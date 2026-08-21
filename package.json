@@ -1,0 +1,12 @@
+{
+  "name": "pi-plugins",
+  "private": true,
+  "description": "Pi extensions installed directly from GitHub.",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": [
+      "./packages/pi-scheduled-wake/extensions/scheduled-wake.ts",
+      "./packages/pi-qq/extensions/qq.ts"
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "pi-qq",
+  "version": "0.1.0",
+  "description": "Pi extension: /qq <question> asks a one-off question with the full context of the main agent; the prompt and answer are never saved to the agent context.",
+  "keywords": ["pi-package", "pi-extension", "qq", "quick-question", "context"],
+  "license": "UNLICENSED",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nisan1101/pi-plugins.git",
+    "directory": "packages/pi-qq"
+  },
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
