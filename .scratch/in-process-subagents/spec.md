@@ -18,7 +18,7 @@ The parent launches a uniquely named subagent with the `subagent` tool. Launches
 
 The extension displays active names in Pi's existing footer status area. A waiting subagent is marked with `?`. Progress is delivered visibly without triggering a parent turn. Questions wake the parent and keep the child tool call blocked until the parent answers. Natural completion and failure write a private temporary `result.md`, wake the parent exactly once with a bounded preview and result path, and then dispose the child session automatically.
 
-The first version supports at most four active subagents, rejects excess launches instead of queueing them, exposes no result-polling or resume tool, and provides no external Zellij or ZMX display.
+The first version limits active subagents using a global configuration value whose default is four, rejects launches beyond that limit instead of queueing them, exposes no result-polling or resume tool, and provides no external Zellij or ZMX display.
 
 ## User Stories
 
@@ -51,9 +51,9 @@ The first version supports at most four active subagents, rejects excess launche
 27. As a Pi user, I want an invalid or unconfigured model profile rejected clearly, so that the extension never silently runs an unintended model.
 28. As a Pi user, I want model profiles stored in Pi's global agent configuration, so that they are consistent across projects in the first version.
 29. As a Pi user, I want no project-level profile override initially, so that repository-controlled files cannot unexpectedly change subagent cost or capability.
-30. As a Pi user, I want no more than four active subagents, so that accidental fan-out cannot consume unbounded resources or model budget.
-31. As a Pi user, I want a fifth launch rejected with the active names, so that overload is explicit and actionable.
-32. As a Pi user, I want excess work rejected rather than queued, so that the first version has no hidden scheduler or delayed execution semantics.
+30. As a Pi user, I want to configure the maximum number of active subagents globally, so that I can choose an appropriate resource and model-budget limit.
+31. As a Pi user, I want the maximum to default to four, so that accidental fan-out remains bounded without requiring configuration.
+32. As a Pi user, I want launches beyond the configured maximum rejected with the active names rather than queued, so that overload is explicit and actionable.
 33. As a Pi user, I want to send a message to an active subagent by name, so that I can redirect or clarify its work.
 34. As a Pi user, I want a normal parent message delivered using Pi's steering semantics, so that it reaches the child after its current tool execution.
 35. As a Pi user, I want a message sent while a child is starting handled without targeting the wrong session, so that fast follow-up guidance remains safe.
@@ -120,7 +120,7 @@ The first version supports at most four active subagents, rejects excess launche
 - `subagent` requires a caller-selected `name` and `prompt`. It accepts an optional `model_profile` whose default is `inherit`.
 - Do not expose a context or inheritance parameter in the first version. Every child begins with no parent conversation messages.
 - Restrict `model_profile` to `inherit`, `low`, `medium`, `high`, and `xhigh`.
-- Load model profile definitions from a global `subagents.json` in Pi's agent configuration directory. Each configured profile resolves to a model and thinking level. Do not load project-level profile overrides in the first version.
+- Load model profile definitions and an optional `maxConcurrent` value from a global `subagents.json` in Pi's agent configuration directory. Each configured profile resolves to a model and thinking level. `maxConcurrent` must be a positive integer and defaults to four when omitted. Ignore an invalid value with a warning and use the default. Do not load project-level overrides in the first version.
 - Resolve `inherit` from the parent session's current model and thinking level. Reject unavailable models, unsupported profile definitions, and named profiles that are not configured rather than silently falling back.
 - Create each child as an independent in-process Pi `AgentSession` using Pi's public SDK and an in-memory child session manager.
 - Give each child a separately constructed resource loader and extension runner. Bind child extensions so they receive normal child `session_start` and `session_shutdown` lifecycle behavior.
@@ -135,7 +135,7 @@ The first version supports at most four active subagents, rejects excess launche
 - Add parent guidance not to modify the delegated scope while the named child remains active. If a new parent turn needs overlapping work, the parent should message or kill the child first.
 - Treat the caller-selected name as the public handle. Require uniqueness among starting, running, and waiting children. Permit reuse immediately after terminal finalization.
 - Maintain an in-memory active-child registry scoped to the parent extension instance. Track at least starting, running, waiting-for-parent, completed, failed, and killed terminal transitions, while exposing only active states through controls and footer status.
-- Allow four active children. Count starting, running, and waiting children toward the limit. Reject an excess launch and report the active names. Do not queue launches.
+- Enforce the configured maximum number of active children. Count starting, running, and waiting children toward the limit. Reject an excess launch and report the configured limit and active names. Do not queue launches.
 - Start child creation and execution asynchronously and return the public name immediately after the active record is accepted. Route asynchronous startup failures through normal failed finalization and parent notification.
 - `message_subagent` requires an active child name and message. If that child has a pending question, use the message as the answer and resolve the pending child tool call directly. Otherwise deliver it through the child session's steering method. Buffer only against the same active record while its session is starting; never carry a message across name reuse.
 - Reject parent messages to terminal or unknown names and identify that no active child can receive them.
@@ -178,7 +178,9 @@ The first version supports at most four active subagents, rejects excess launche
 - Verify `inherit` model behavior and each configured model profile.
 - Verify missing, malformed, unavailable, and unsupported model profiles fail clearly without leaving an active child.
 - Verify duplicate active names are rejected and terminal names may be reused.
-- Verify four active children are accepted and a fifth is rejected without queueing.
+- Verify the active-child limit defaults to four when `maxConcurrent` is omitted.
+- Verify a valid positive `maxConcurrent` changes the accepted active-child count and that the next launch is rejected without queueing.
+- Verify zero, negative, fractional, and otherwise invalid `maxConcurrent` values produce a warning and fall back to four.
 - Verify a successful launch returns immediately with a terminating result and that an asynchronous child failure still notifies the parent.
 - Verify a normal `message_subagent` call reaches the active child's steering method.
 - Verify a message to a starting child is associated only with that child instance and cannot leak into a later child that reuses the name.
@@ -218,7 +220,6 @@ The first version supports at most four active subagents, rejects excess launche
 - Multiple simultaneous pending questions for one child.
 - Automatic question timeouts, default answers, or escalation policies.
 - Queued launches or a configurable scheduler.
-- More than four active children.
 - OS-level hard termination or process isolation.
 - Child subprocesses, RPC framing, or external process supervisors.
 - Worktree, container, VM, or filesystem isolation.
@@ -237,6 +238,7 @@ The first version supports at most four active subagents, rejects excess launche
 - An **active subagent** is starting, running, or waiting for a parent answer. Terminal subagents are removed from active state.
 - A **delegated task** is the launch prompt delivered as the child's sole initial user message.
 - A **model profile** is a global named mapping to one model and thinking level. `inherit` is resolved from the parent rather than stored as a mapping.
+- **`maxConcurrent`** is the global positive-integer limit for starting, running, and waiting subagents; it defaults to four.
 - A **pending question** is one unresolved child `message_parent` tool execution. Parent steering cannot answer it because steering is delivered only after the current tool execution; `message_subagent` therefore resolves it directly.
 - The footer is an activity indicator, not a durable source of truth or a communication log.
 - Same-process child sessions reduce orchestration code but share the parent's event loop, memory, and failure domain.
