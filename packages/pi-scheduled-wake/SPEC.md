@@ -8,6 +8,8 @@ Users need an agent to start local long-running work or wait on remote asynchron
 
 The work and the wake-up have different lifecycles. A process manager owns local background jobs—preferably zmx when available—while remote systems own remote asynchronous state such as Kubernetes pod readiness. Pi only remembers when the agent should wake and what state to inspect.
 
+Pi shutdown, reload, session replacement, crashes, or power loss can destroy an in-memory timer or queued follow-up before its wake message reaches the agent. The resumed session must report those interrupted wakes with the next user prompt without reviving their timers or triggering an unsolicited turn.
+
 ## Solution
 
 Provide a project-local Pi extension with one model-callable capability: schedule an agent wake after a relative delay.
@@ -17,6 +19,8 @@ For local long-running commands, the agent launches a named job through zmx when
 When the timer expires, the extension injects a visible custom wake message into the same Pi session. If the agent is idle, Pi starts a new agent run without user input. If an agent run is already active, Pi queues the wake as a follow-up and delivers it after the active work settles.
 
 A wake is advisory: it means “inspect the target’s current state,” not “the work has completed.” If the local job or remote condition is still pending, the agent schedules another wake. If it has completed, the agent inspects and reports the result.
+
+Each scheduling and delivery transition persists a complete pending-wake snapshot in the session. On session start, the extension reads the newest branch-local snapshot. Any unresolved wakes are summarized in one visible cancellation message that joins model context but does not trigger a turn; the message records an empty snapshot to prevent duplicate notices.
 
 ## User Stories
 
@@ -36,7 +40,7 @@ A wake is advisory: it means “inspect the target’s current state,” not “
 14. As a user, I want local background jobs launched through zmx when available or another process manager rather than raw shell detachment, so that they have an explicit lifecycle owner.
 15. As a user, I do not want Pi to kill managed jobs merely because a wake timer is cleared, so that process and timer lifecycles remain independent.
 16. As a user, I expect pending wakes to stop when their Pi session shuts down, so that an obsolete session cannot resume unexpectedly.
-17. As a user, I accept that pending wakes do not survive Pi exit, extension reload, session replacement, resume, or fork, so that the first version can remain in-memory and simple.
+17. As a user, I want unresolved wakes reported when I next prompt a resumed session, so that Pi shutdown does not silently lose planned checks.
 18. As a user, I want a delayed wake to fire after Pi becomes responsive again if the event loop or computer was temporarily suspended, so that elapsed timers are not silently discarded during a live session.
 19. As an agent, I want to schedule a wake with a relative delay, so that I can choose an appropriate polling interval for each job.
 20. As an agent, I want to attach a self-contained reason to a wake, so that I know which local job or remote target to inspect after intervening turns or context compaction.
@@ -45,13 +49,13 @@ A wake is advisory: it means “inspect the target’s current state,” not “
 23. As an agent, I want multiple independently scheduled wakes to remain possible, so that separate background activities do not overwrite one another.
 24. As an agent, I want invalid delays or empty reasons rejected at the tool interface, so that unusable timers are not silently accepted.
 25. As an agent, I want timer expiration to deliver a custom contextual message rather than a user-role message, so that provenance remains accurate.
-26. As an extension maintainer, I want the extension to own only timer handles, so that process lifecycle complexity remains outside the module.
-27. As an extension maintainer, I want expired timers removed from memory, so that repeated scheduling does not leak handles.
+26. As an extension maintainer, I want the extension to own only timers and serializable wake metadata, so that process lifecycle complexity remains outside the module.
+27. As an extension maintainer, I want delivered wakes removed from runtime and persisted pending state, so that repeated scheduling does not leak records.
 28. As an extension maintainer, I want all pending timers cleared during session shutdown, so that callbacks cannot target a stale session.
 29. As an extension maintainer, I want timer delivery to use Pi’s existing follow-up queue, so that the extension does not implement its own concurrency queue or lock.
 30. As an extension maintainer, I want the behavior to remain correct regardless of whether a user prompt or timer event wins an ordering race, so that no strict total ordering is required.
 31. As an extension maintainer, I want to rely on Pi’s agent-run serialization, so that the extension never starts or coordinates concurrent model loops itself.
-32. As an extension maintainer, I want the production interface to remain limited to scheduling a wake, so that cancellation, persistence, process inspection, and job registries can be deferred until demonstrated needs arise.
+32. As an extension maintainer, I want the model-facing interface to remain limited to scheduling a wake, so that timer listing, explicit cancellation, process inspection, and job registries remain deferred until demonstrated needs arise.
 33. As a user, I want scheduled wakes to revisit remote asynchronous conditions such as Kubernetes pod readiness, so that the feature is useful even when no local process exists.
 
 ## Implementation Decisions
@@ -69,8 +73,10 @@ A wake is advisory: it means “inspect the target’s current state,” not “
 - Scheduling creates an in-memory runtime timer and returns immediately.
 - The scheduling tool returns a terminating result so Pi skips the automatic post-tool model call when all finalized results in that tool batch are terminating.
 - The tool’s instruction should discourage combining `schedule_wake` with unrelated parallel tool calls because a non-terminating result in the same tool batch prevents early termination.
-- Each scheduling call creates an independent pending wake. The extension retains only the timer handles required for expiration and shutdown cleanup.
-- An expired timer removes its own handle before attempting message delivery.
+- Each scheduling call creates an independent pending wake identified by its tool-call ID and records the original reason, absolute deadline, and runtime timer handle.
+- Scheduling appends a custom state entry containing the complete pending-wake snapshot before returning. Custom state entries persist in the session but do not enter LLM context.
+- Timer expiration sends the wake ID in custom-message details but keeps the wake pending until Pi emits `message_end` for that custom message.
+- On Scheduled Wake `message_end`, remove the delivered wake and append the new complete pending-wake snapshot. This keeps a queued but undelivered follow-up recoverable.
 - Timer expiration injects a custom message with a dedicated Scheduled Wake message type, the original reason as model context, and visible display enabled.
 - Timer delivery sets `triggerTurn` so an idle session begins an agent run without user input.
 - Timer delivery uses follow-up delivery so a wake that fires during active work waits until that work has no remaining tool calls.
@@ -79,15 +85,19 @@ A wake is advisory: it means “inspect the target’s current state,” not “
 - A timer and user prompt that arrive nearly together have nondeterministic ordering. Correctness depends only on eventual delivery of both inputs and an idempotent target-state check.
 - The chosen process manager is the sole owner and source of truth for local background process lifecycle, status, logs, interaction, cancellation, and cleanup. Remote systems remain the source of truth for their own asynchronous state.
 - The extension never starts, tracks, polls, signals, or kills a process and never interprets a process-manager session or job identifier.
-- Timer lifecycle is session-scoped. Session shutdown clears all pending timers and prevents their callbacks from injecting later messages into the obsolete session.
-- Pending wakes are intentionally ephemeral. They are not persisted to session entries, project files, or external storage and are not restored after restart or session replacement.
+- Runtime timer lifecycle is session-scoped. Session shutdown clears all timer handles and runtime wake records without writing an empty checkpoint, preventing callbacks while preserving evidence of unresolved wakes.
+- Timer handles remain ephemeral and are never restored. Serializable pending-wake metadata persists only in Pi’s session history so a resumed session can report interruption.
+- On session start, walk backward from the active leaf through indexed parent lookups and stop at the newest valid state checkpoint or cancellation message. Do not construct the complete branch.
+- Skip malformed markers rather than failing session startup.
+- If unresolved wakes exist, append one visible cancellation message containing their original reasons and deadlines with turn triggering disabled. Its details contain the cancelled IDs and an empty pending snapshot, making it the terminal marker for later resumes.
+- Do not rearm recovered wakes, including those whose deadlines are still in the future.
 - A managed local job may continue after its associated Pi timer or session ends. Stopping or retaining that job follows its process manager’s semantics, not Scheduled Wake semantics.
-- Delivery failures are reported through Pi’s extension error reporting. The first version does not retry failed wake delivery because retry durability would require persistent state.
+- Delivery failures are reported through Pi’s extension error reporting. The extension does not retry in the same runtime; an undelivered wake remains in the latest checkpoint and is reported if the session is resumed.
 
 ## Testing Decisions
 
-- Test at one high seam: invoke the registered `schedule_wake` tool through an ExtensionAPI-compatible harness and observe its tool result and outbound Pi message. Do not test private timer collections or helper functions directly.
-- Treat the tool interface and emitted wake message as the behavioral test surface. Tests should describe user-visible scheduling, termination, delivery, and cleanup behavior rather than implementation details such as collection types.
+- Test at one high seam: load the extension through an ExtensionAPI-compatible harness, invoke the registered tool, drive lifecycle handlers and fake time, and observe persisted session entries and outbound Pi messages. Do not test private collections or helpers directly.
+- Treat the tool interface, lifecycle events, persisted checkpoints, and emitted custom messages as the behavioral test surface. Tests should describe scheduling, delivery, shutdown, and recovery rather than implementation collection types.
 - Use controllable runtime time in tests so delays can be advanced deterministically without waiting on wall-clock time. Do not add a production clock interface solely for testing if the existing test environment can control timers.
 - Verify that a valid scheduling request returns immediately with a terminating tool result.
 - Verify that no wake message is emitted before the requested delay has elapsed.
@@ -95,6 +105,12 @@ A wake is advisory: it means “inspect the target’s current state,” not “
 - Verify that the wake message requests both turn triggering and follow-up delivery.
 - Verify that an expired timer cannot emit a second message.
 - Verify that multiple scheduling calls produce independent wake messages rather than replacing one another.
+- Verify that scheduling persists complete snapshots with wake IDs, exact reasons, and deadlines.
+- Verify that a fired wake remains pending until its custom message reaches `message_end`, then persists the remaining snapshot.
+- Verify that shutdown stops runtime timers without overwriting the latest pending snapshot.
+- Verify that resume aggregates every unresolved wake into one visible cancellation message with turn triggering disabled.
+- Verify that the cancellation marker prevents duplicate notices and that delivered wakes are not later reported as cancelled.
+- Verify that recovery stays on the active branch, stops at the newest valid marker, and safely skips malformed state.
 - Verify that session shutdown prevents every pending timer from emitting a wake message.
 - Verify that shutdown remains safe when no timers are pending and when called more than once.
 - Verify rejection of zero, negative, non-finite, and runtime-unsupported delays.
@@ -132,6 +148,6 @@ A wake is advisory: it means “inspect the target’s current state,” not “
 - “Remote target” is an asynchronous condition owned by an external system, such as Kubernetes pod readiness.
 - The key invariant is that every wake causes the agent to read current target state. Neither elapsed time nor message order is evidence that work completed.
 - The design intentionally accepts delayed observation: local or remote work may complete well before the next wake.
-- The design also intentionally accepts that a managed local job can outlive Pi while its pending wake cannot.
+- A managed local job and its pending-wake metadata can outlive Pi, but the runtime timer cannot; resume reports the interruption instead of restoring the timer.
 - If stale wake-ups become costly, cancellation can be considered as a separate interface change. If polling latency becomes costly, an external completion signal can be considered without transferring process ownership into this extension.
-- This specification is local-only as requested and is not published to an issue tracker.
+- This package specification is maintained alongside the extension; implementation-specific work may also be tracked under the repository’s local `.scratch/` issue tracker.

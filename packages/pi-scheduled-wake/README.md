@@ -2,7 +2,7 @@
 
 A [pi](https://pi.dev) extension that lets the agent schedule a future turn, become idle, and continue later without another user prompt.
 
-The extension manages only timers. Use `zmx` when available—or another process manager—to own local long-running processes; scheduled wakes can also revisit remote asynchronous state such as Kubernetes pod readiness.
+The extension manages timers and session-local interruption metadata only. Use `zmx` when available—or another process manager—to own local long-running processes; scheduled wakes can also revisit remote asynchronous state such as Kubernetes pod readiness.
 
 ## Behaviour
 
@@ -10,7 +10,8 @@ The extension manages only timers. Use `zmx` when available—or another process
 - **Wakes without user input** — when the timer expires, an idle Pi session starts a new agent turn.
 - **Does not interrupt active work** — if the user already has the agent working, the wake is queued as a follow-up.
 - **Advisory, not completion-driven** — a wake tells the agent to inspect current local or remote state; it does not claim the work finished.
-- **Session-scoped** — pending wakes are cleared when the Pi session shuts down and are not restored later.
+- **Does not restore timers** — runtime timers stop with their Pi session and are never rearmed after resume.
+- **Reports interrupted wakes** — unresolved wake metadata persists in the session; the next prompt after resume tells the agent which checks were interrupted without starting a turn automatically.
 - **Process-agnostic** — the extension never starts, polls, or kills background processes.
 
 ## Agent workflow
