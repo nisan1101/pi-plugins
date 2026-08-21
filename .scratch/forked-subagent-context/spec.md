@@ -67,7 +67,7 @@ This feature is deferred and not ready for implementation. Its public launch par
 - Do not invoke an LLM to summarize, select, or rewrite inherited context.
 - Do not flatten inherited messages into a human-readable transcript.
 - Append a fork-specific role section to the parent's effective system prompt. Identify the child as a forked background clone, distinguish it from the authoritative parent, describe the snapshot as potentially stale, and limit work to the final delegated task.
-- Keep the delegated task as a new final native user message using the minimal `delegated_task` text delimiter with the safe child name and fork identity.
+- Keep the delegated task as a new final native user message using the minimal `delegated_task` text delimiter with the UUID, display name, and fork identity.
 - Treat the fork as immutable startup input. Do not live-sync later parent messages, child messages, tool results, or system-prompt changes.
 - Continue sharing the parent's current working directory, effective system guidance, active work tools, extensions, skills, model-profile resolution, communication tools, result contract, status behavior, concurrency limit, and cooperative cancellation policy.
 - Continue excluding subagent orchestration tools from the child.
