@@ -181,7 +181,13 @@ function assistantText(assistant: ChildMessage | undefined): string {
 
 type TerminalStatus = "completed" | "failed" | "killed";
 
-function naturalOutcome(assistant: ChildMessage | undefined): { status: TerminalStatus; error?: string } {
+interface TerminalOutcome {
+  status: TerminalStatus;
+  error?: string;
+  abort?: boolean;
+}
+
+function naturalOutcome(assistant: ChildMessage | undefined): TerminalOutcome {
   const failed = assistant?.stopReason === "error" || assistant?.stopReason === "aborted";
   return failed
     ? { status: "failed", error: assistant?.errorMessage ?? "Subagent failed." }
@@ -457,7 +463,7 @@ export function createSubagentsExtension({
         },
       });
 
-    const disposeChild = async (child: ChildSession, abort: boolean) => {
+    const disposeChild = async (child: ChildSession, { abort = false }: { abort?: boolean } = {}) => {
       if (abort) {
         try {
           await child.abort();
@@ -474,11 +480,9 @@ export function createSubagentsExtension({
     const claimFinalization = (
       record: ChildRecord,
       ctx: ExtensionContext,
-      status: TerminalStatus,
       child: ChildSession | undefined,
-      error?: string,
-      abort = false,
-    ): Promise<string> | undefined => {
+      { status, error, abort = false }: TerminalOutcome,
+): Promise<string> | undefined => {
       if (children.get(record.id) !== record || !isActive(record)) return undefined;
 
       const previousState = record.state;
@@ -503,7 +507,7 @@ export function createSubagentsExtension({
         } finally {
           record.unsubscribe?.();
           record.unsubscribe = undefined;
-          if (child) await disposeChild(child, false);
+          if (child) await disposeChild(child);
           if (children.get(record.id) === record) children.delete(record.id);
           updateStatus(ctx);
         }
@@ -534,12 +538,21 @@ export function createSubagentsExtension({
       return finalization;
     };
 
+    const claimNaturalFinalization = (record: ChildRecord, ctx: ExtensionContext, child: ChildSession) =>
+      claimFinalization(
+        record,
+        ctx,
+        child,
+        naturalOutcome(record.lastAssistant ?? terminalAssistant(child.messages)),
+      );
+
     const runChild = async (record: ChildRecord, ctx: ExtensionContext, options: ChildSessionOptions) => {
       let child: ChildSession | undefined;
+      let promptStarted = false;
       try {
         child = await createChildSession(options);
         if (children.get(record.id) !== record || !isActive(record)) {
-          await disposeChild(child, true);
+          await disposeChild(child, { abort: true });
           return;
         }
 
@@ -549,10 +562,7 @@ export function createSubagentsExtension({
             record.lastAssistant = event.message;
           }
           if (event.type === "agent_settled" && isActive(record)) {
-            const { status, error } = naturalOutcome(
-              record.lastAssistant ?? terminalAssistant(child!.messages),
-            );
-            void claimFinalization(record, ctx, status, child, error)?.catch(() => {});
+            void claimNaturalFinalization(record, ctx, child!)?.catch(() => {});
           }
         });
 
@@ -564,6 +574,7 @@ export function createSubagentsExtension({
 
         const startup = record.state;
         if (startup.phase !== "starting") return;
+        promptStarted = true;
         const prompt = child.prompt(delegatedTask(record));
         const startupSteering = startup.guidance.map((message) => child!.steer(message));
         record.state = { phase: "running", child };
@@ -571,13 +582,14 @@ export function createSubagentsExtension({
         await prompt;
         if (children.get(record.id) !== record || !isActive(record)) return;
 
-        const { status, error } = naturalOutcome(
-          record.lastAssistant ?? terminalAssistant(child.messages),
-        );
-        await claimFinalization(record, ctx, status, child, error);
+        await claimNaturalFinalization(record, ctx, child);
       } catch (error) {
         if (children.get(record.id) === record && isActive(record)) {
-          await claimFinalization(record, ctx, "failed", child, errorMessage(error), true);
+          await claimFinalization(record, ctx, child, {
+            status: "failed",
+            error: errorMessage(error),
+            abort: promptStarted,
+          });
         }
       }
     };
@@ -607,13 +619,14 @@ export function createSubagentsExtension({
       updateStatus(ctx);
 
       await Promise.allSettled([
-        ...childCleanups.map((child) => disposeChild(child, true)),
+        ...childCleanups.map((child) => disposeChild(child, { abort: true })),
         ...finalizations,
       ]);
     };
 
     pi.on("session_shutdown", (_event, ctx) => cleanupOwnedChildren(ctx));
 
+    // ponytail: later tree cancellation can leave children stopped; keep this safety-first boundary until Pi adds a confirmed pre-commit hook.
     pi.on("session_before_tree", async (_event, ctx) => {
       treeStoppedHandles = [...children.values()].map(
         ({ displayName, id }) => `${displayName}#${id.slice(0, 8)}`,
@@ -698,7 +711,7 @@ export function createSubagentsExtension({
 
         const state = record.state;
         const child = state.phase === "starting" ? undefined : state.child;
-        const finalization = claimFinalization(record, ctx, "killed", child, undefined, true);
+        const finalization = claimFinalization(record, ctx, child, { status: "killed", abort: true });
         if (!finalization) throw new Error(`No active subagent with UUID ${id}.`);
         const resultPath = await finalization;
 

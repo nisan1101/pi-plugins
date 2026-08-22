@@ -819,6 +819,9 @@ test("startup failure disposes a child that cannot rediscover every active work 
     async prompt() {
       prompted = true;
     },
+    async abort() {
+      lifecycle.push("abort");
+    },
     async shutdown() {
       lifecycle.push("shutdown");
     },
