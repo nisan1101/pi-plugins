@@ -123,11 +123,27 @@ The first version limits active subagents using a global configuration value who
 - Require the full `id` in `message_subagent` and `kill_subagent`. Short UUID prefixes are display-only and are never accepted as control identifiers.
 - Do not expose a context or inheritance parameter in the first version. Every child begins with no parent conversation messages.
 - Restrict `model_profile` to `inherit`, `low`, `medium`, `high`, and `xhigh`.
-- Load model profile definitions and an optional `maxConcurrent` value from a global `subagents.json` in Pi's agent configuration directory. Each configured profile resolves to a model and thinking level. `maxConcurrent` must be a positive integer and defaults to four when omitted. Ignore an invalid value with a warning and use the default. Do not load project-level overrides in the first version.
+- Load model profile definitions and an optional `maxConcurrent` value from a global `subagents.json` in Pi's agent configuration directory. Do not load project-level overrides in the first version. The file shape is:
+
+  ```json
+  {
+    "maxConcurrent": 4,
+    "profiles": {
+      "low": {
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-5",
+        "thinkingLevel": "low"
+      }
+    }
+  }
+  ```
+
+  Each configured profile requires non-empty `provider` and `model` strings plus a Pi thinking level. A missing file uses defaults with only `inherit` available. Invalid JSON or malformed/unsupported profile definitions reject launch. `maxConcurrent` must be a positive integer and defaults to four when omitted; an invalid value emits a warning and falls back to four.
 - Resolve `inherit` from the parent session's current model and thinking level. Reject unavailable models, unsupported profile definitions, and named profiles that are not configured rather than silently falling back.
 - Create each child as an independent in-process Pi `AgentSession` using Pi's public SDK and an in-memory child session manager.
 - Give each child a separately constructed resource loader and extension runner. Bind child extensions so they receive normal child `session_start` and `session_shutdown` lifecycle behavior.
-- Inherit the parent's effective system prompt, working directory, active work tools, extensions, and skills. The child conversation itself remains fresh.
+- Inherit the parent's effective system prompt, working directory, current model, and thinking level. Recreate capabilities through a fresh `DefaultResourceLoader` using the same global/project configuration: rediscover configured extensions and skills, use the parent's active work-tool names as the child allowlist, and fail startup visibly if an active work tool cannot be rediscovered. The child conversation itself remains fresh.
+- Treat this as configuration-equivalent inheritance, not exact runtime cloning. Pi SDK `0.84.2` does not expose the parent resource loader or executable tool/extension definitions, so temporary `pi -e` extensions, SDK-inline extension factories, additional parent-only resource paths, and runtime-injected custom tools do not carry over. Do not add custom resource scanners or cloning registries to compensate.
 - Apply a child tool denylist on every child tool-registry rebuild for `subagent`, `message_subagent`, and `kill_subagent`, preventing recursive orchestration.
 - Add one child-only custom tool, `message_parent`, after applying the inherited work-tool set.
 - Append a fresh-subagent role section to the inherited effective system prompt. State that the child is not the parent, has no inherited parent conversation, works under an authoritative parent, shares the workspace, must stay within the delegated task, must inspect current state before edits, must not revert unrelated work, and must report conflicts rather than force changes.

@@ -4,7 +4,7 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] `subagent` accepts a non-empty display name and prompt, supports the agreed model profiles, and returns a terminating result containing the exact display name and a generated full UUID.
 - [ ] Duplicate display names are accepted with distinct UUIDs; display names never act as control identifiers.
