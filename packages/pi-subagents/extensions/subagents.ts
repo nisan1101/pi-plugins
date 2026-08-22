@@ -195,9 +195,13 @@ function preview(result: string): string {
   return characters.length > 500 ? `${characters.slice(0, 500).join("")}…` : result;
 }
 
+function isActive(record: ChildRecord): boolean {
+  return record.state !== "finalizing";
+}
+
 function renderStatus(records: Iterable<ChildRecord>): string | undefined {
   const handles = [...records]
-    .filter(({ state }) => state !== "finalizing")
+    .filter(isActive)
     .map(({ displayName, id, state }) => `${displayName}#${id.slice(0, 8)}${state === "waiting" ? "?" : ""}`);
   if (handles.length === 0) return undefined;
   const visible = handles.slice(0, 3);
@@ -299,6 +303,23 @@ export function createSubagentsExtension({
 }: SubagentsExtensionOptions = {}) {
   return function subagents(pi: ExtensionAPI) {
     const children = new Map<string, ChildRecord>();
+    // Pi bypasses its follow-up queue when triggerTurn is false, so preserve order until the parent settles.
+    const pendingParentMessages: Array<{ wakesParent: boolean; send(): void }> = [];
+    const flushParentMessages = () => {
+      while (pendingParentMessages.length > 0) {
+        const next = pendingParentMessages.shift()!;
+        next.send();
+        if (next.wakesParent) return;
+      }
+    };
+    const deliverParentMessage = (ctx: ExtensionContext, wakesParent: boolean, send: () => void) => {
+      if (ctx.isIdle() && pendingParentMessages.length === 0) send();
+      else {
+        pendingParentMessages.push({ wakesParent, send });
+        if (ctx.isIdle()) flushParentMessages();
+      }
+    };
+    pi.on("agent_settled", flushParentMessages);
 
     const updateStatus = (ctx: ExtensionContext) => {
       if (ctx.mode === "tui") ctx.ui.setStatus("subagents", renderStatus(children.values()));
@@ -326,14 +347,16 @@ export function createSubagentsExtension({
             });
             record.state = "waiting";
             updateStatus(ctx);
-            pi.sendMessage(
-              {
-                customType: "subagent-question",
-                content: `Subagent ${record.displayName} (${record.id}) asks:\n\n${message}`,
-                display: true,
-                details,
-              },
-              { deliverAs: "followUp", triggerTurn: true },
+            deliverParentMessage(ctx, true, () =>
+              pi.sendMessage(
+                {
+                  customType: "subagent-question",
+                  content: `Subagent ${record.displayName} (${record.id}) asks:\n\n${message}`,
+                  display: true,
+                  details,
+                },
+                { deliverAs: "followUp", triggerTurn: true },
+              ),
             );
             const response = await answer;
             return {
@@ -341,15 +364,17 @@ export function createSubagentsExtension({
               details: { ...details, answer: response },
             };
           }
-          pi.sendMessage(
-            {
-              customType: "subagent-progress",
-              content: `Subagent ${record.displayName} (${record.id}) progress:\n\n${message}`,
-              display: true,
-              details,
-            },
-            { deliverAs: "followUp", triggerTurn: false },
-          );
+          const send = () =>
+            pi.sendMessage(
+              {
+                customType: "subagent-progress",
+                content: `Subagent ${record.displayName} (${record.id}) progress:\n\n${message}`,
+                display: true,
+                details,
+              },
+              { deliverAs: "followUp", triggerTurn: false },
+            );
+          deliverParentMessage(ctx, false, send);
           return {
             content: [{ type: "text" as const, text: "Progress reported to parent." }],
             details,
@@ -387,17 +412,18 @@ export function createSubagentsExtension({
         child.dispose();
         children.delete(record.id);
         updateStatus(ctx);
-
-        pi.sendMessage(
-          {
-            customType: "subagent-completed",
-            content:
-              `Subagent ${record.displayName} (${record.id}) completed.\n\n` +
-              `${preview(result)}\n\nResult: ${resultPath}`,
-            display: true,
-            details: { id: record.id, display_name: record.displayName, result_path: resultPath },
-          },
-          { deliverAs: "followUp", triggerTurn: true },
+        deliverParentMessage(ctx, true, () =>
+          pi.sendMessage(
+            {
+              customType: "subagent-completed",
+              content:
+                `Subagent ${record.displayName} (${record.id}) completed.\n\n` +
+                `${preview(result)}\n\nResult: ${resultPath}`,
+              display: true,
+              details: { id: record.id, display_name: record.displayName, result_path: resultPath },
+            },
+            { deliverAs: "followUp", triggerTurn: true },
+          ),
         );
       } catch (error) {
         if (children.get(record.id) === record) {
@@ -475,7 +501,7 @@ export function createSubagentsExtension({
 
         const agentDir = getAgentDir();
         const config = await readConfig(agentDir, ctx);
-        if ([...children.values()].filter(({ state }) => state !== "finalizing").length >= config.maxConcurrent) {
+        if ([...children.values()].filter(isActive).length >= config.maxConcurrent) {
           throw new Error(
             `Subagent limit ${config.maxConcurrent} reached: ${renderStatus(children.values()) ?? "no active handles"}.`,
           );
@@ -513,14 +539,16 @@ export function createSubagentsExtension({
         }).catch((error) => {
           children.delete(record.id);
           updateStatus(ctx);
-          pi.sendMessage(
-            {
-              customType: "subagent-failed",
-              content: `Subagent ${record.displayName} (${record.id}) failed to start: ${errorMessage(error)}`,
-              display: true,
-              details: { id: record.id, display_name: record.displayName },
-            },
-            { deliverAs: "followUp", triggerTurn: true },
+          deliverParentMessage(ctx, true, () =>
+            pi.sendMessage(
+              {
+                customType: "subagent-failed",
+                content: `Subagent ${record.displayName} (${record.id}) failed to start: ${errorMessage(error)}`,
+                display: true,
+                details: { id: record.id, display_name: record.displayName },
+              },
+              { deliverAs: "followUp", triggerTurn: true },
+            ),
           );
         });
 

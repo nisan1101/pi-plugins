@@ -30,6 +30,10 @@ function fakeChild(overrides = {}) {
   };
 }
 
+function callTool(tool, params, context = {}) {
+  return tool.execute("call", params, undefined, undefined, context);
+}
+
 async function loadExtension(t, createChildSession, overrides = {}) {
   const agentDir = await mkdtemp(join(tmpdir(), "pi-subagents-test-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -44,7 +48,14 @@ async function loadExtension(t, createChildSession, overrides = {}) {
   const statuses = [];
   const warnings = [];
   const sent = [];
+  const handlers = new Map();
+  let parentIdle = overrides.parentIdle ?? true;
   createSubagentsExtension({ createChildSession })({
+    on(event, handler) {
+      const eventHandlers = handlers.get(event) ?? [];
+      eventHandlers.push(handler);
+      handlers.set(event, eventHandlers);
+    },
     registerTool(definition) {
       tools.set(definition.name, definition);
     },
@@ -74,6 +85,9 @@ async function loadExtension(t, createChildSession, overrides = {}) {
     isProjectTrusted() {
       return overrides.projectTrusted ?? true;
     },
+    isIdle() {
+      return parentIdle;
+    },
     ui: {
       setStatus(key, text) {
         statuses.push({ key, text });
@@ -87,7 +101,7 @@ async function loadExtension(t, createChildSession, overrides = {}) {
   const executeTool = (name, params) => {
     const tool = tools.get(name);
     assert.ok(tool);
-    return tool.execute("call", params, undefined, undefined, context);
+    return callTool(tool, params, context);
   };
   return {
     agentDir,
@@ -95,6 +109,12 @@ async function loadExtension(t, createChildSession, overrides = {}) {
     statuses,
     warnings,
     sent,
+    async emit(event) {
+      for (const handler of handlers.get(event) ?? []) await handler({ type: event }, context);
+    },
+    setIdle(value) {
+      parentIdle = value;
+    },
     execute: (params) => executeTool("subagent", params),
     message: (params) => executeTool("message_subagent", params),
   };
@@ -153,17 +173,25 @@ test("parent messages buffer during startup and steer only the addressed running
   const second = await extension.execute({ display_name: "second", prompt: "Second task." });
 
   const buffered = await extension.message({ id: first.details.id, message: "Use the public API." });
+  await extension.message({ id: first.details.id, message: "Preserve startup order." });
+  await extension.message({ id: second.details.id, message: "Only for the second child." });
   assert.match(buffered.content[0].text, /buffered/i);
   assert.deepEqual(steered, [[], []]);
 
   startups[0].resolve(children[0]);
   startups[1].resolve(children[1]);
-  await waitFor(() => steered[0].length === 1);
-  assert.deepEqual(steered, [["Use the public API."], []]);
+  await waitFor(() => steered[0].length === 2 && steered[1].length === 1);
+  assert.deepEqual(steered, [
+    ["Use the public API.", "Preserve startup order."],
+    ["Only for the second child."],
+  ]);
 
   const delivered = await extension.message({ id: first.details.id, message: "Also inspect callers." });
   assert.match(delivered.content[0].text, /steered/i);
-  assert.deepEqual(steered, [["Use the public API.", "Also inspect callers."], []]);
+  assert.deepEqual(steered, [
+    ["Use the public API.", "Preserve startup order.", "Also inspect callers."],
+    ["Only for the second child."],
+  ]);
   await assert.rejects(extension.message({ id: "not-a-uuid", message: "No." }), /full.*uuid/i);
   await assert.rejects(
     extension.message({ id: second.details.id.slice(0, 8), message: "No." }),
@@ -184,26 +212,30 @@ test("child progress reports identity without waking the parent or changing acti
     },
   });
   let creation;
-  const extension = await loadExtension(t, async (options) => {
-    creation = options;
-    return child;
-  });
+  const extension = await loadExtension(
+    t,
+    async (options) => {
+      creation = options;
+      return child;
+    },
+    { parentIdle: false },
+  );
   const launch = await extension.execute({ display_name: "reporter", prompt: "Report a milestone." });
   await waitFor(() => creation !== undefined);
-  const statusCount = extension.statuses.length;
+  const status = extension.statuses.at(-1);
 
   assert.equal(extension.tools.has("message_parent"), false);
   assert.deepEqual(Object.keys(creation.messageParentTool.parameters.properties).sort(), ["kind", "message"]);
-  const result = await creation.messageParentTool.execute(
-    "progress",
-    { kind: "progress", message: "Inspected every caller." },
-    undefined,
-    undefined,
-    {},
-  );
+  const result = await callTool(creation.messageParentTool, {
+    kind: "progress",
+    message: "Inspected every caller.",
+  });
 
   assert.match(result.content[0].text, /reported/i);
-  assert.equal(extension.statuses.length, statusCount);
+  assert.deepEqual(extension.statuses.at(-1), status);
+  assert.equal(extension.sent.length, 0);
+  extension.setIdle(true);
+  await extension.emit("agent_settled");
   assert.equal(extension.sent.length, 1);
   assert.deepEqual(extension.sent[0].options, { deliverAs: "followUp", triggerTurn: false });
   assert.equal(extension.sent[0].message.customType, "subagent-progress");
@@ -229,48 +261,50 @@ test("parent answer resolves one waiting question and later messages resume stee
     },
   });
   let creation;
-  const extension = await loadExtension(t, async (options) => {
-    creation = options;
-    return child;
-  });
+  const extension = await loadExtension(
+    t,
+    async (options) => {
+      creation = options;
+      return child;
+    },
+    { parentIdle: false },
+  );
   await writeFile(join(extension.agentDir, "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
   const launch = await extension.execute({ display_name: "asker", prompt: "Stop if ambiguous." });
   await promptStarted.promise;
   await extension.message({ id: launch.details.id, message: "Queued before the question." });
+  await callTool(creation.messageParentTool, { kind: "progress", message: "Progress before question." });
 
   let questionSettled = false;
-  const question = creation.messageParentTool
-    .execute(
-      "question",
-      { kind: "question", message: "Which API should I preserve?" },
-      undefined,
-      undefined,
-      {},
-    )
-    .finally(() => {
-      questionSettled = true;
-    });
-  await waitFor(() => extension.sent.length === 1);
+  const question = callTool(creation.messageParentTool, {
+    kind: "question",
+    message: "Which API should I preserve?",
+  }).finally(() => {
+    questionSettled = true;
+  });
+  assert.equal(extension.sent.length, 0);
+  extension.setIdle(true);
+  await extension.emit("agent_settled");
+  await waitFor(() => extension.sent.length === 2);
+  await new Promise((resolve) => setTimeout(resolve, 25));
 
   assert.equal(questionSettled, false);
   assert.match(extension.statuses.at(-1).text, /asker#[0-9a-f]{8}\?$/i);
-  assert.deepEqual(extension.sent[0].options, { deliverAs: "followUp", triggerTurn: true });
-  assert.equal(extension.sent[0].message.customType, "subagent-question");
-  assert.equal(extension.sent[0].message.details.id, launch.details.id);
-  assert.equal(extension.sent[0].message.details.display_name, "asker");
-  assert.match(extension.sent[0].message.content, /Which API should I preserve\?/);
+  assert.deepEqual(
+    extension.sent.map(({ message }) => message.customType),
+    ["subagent-progress", "subagent-question"],
+  );
+  const questionNotice = extension.sent[1];
+  assert.deepEqual(questionNotice.options, { deliverAs: "followUp", triggerTurn: true });
+  assert.equal(questionNotice.message.details.id, launch.details.id);
+  assert.equal(questionNotice.message.details.display_name, "asker");
+  assert.match(questionNotice.message.content, /Which API should I preserve\?/);
   await assert.rejects(
     extension.execute({ display_name: "blocked", prompt: "Do not start." }),
     /limit 1 reached/i,
   );
   await assert.rejects(
-    creation.messageParentTool.execute(
-      "second-question",
-      { kind: "question", message: "A second question." },
-      undefined,
-      undefined,
-      {},
-    ),
+    callTool(creation.messageParentTool, { kind: "question", message: "A second question." }),
     /already waiting/i,
   );
 
@@ -312,7 +346,6 @@ test("launch creates one fresh child with inherited capabilities and a delimited
   assert.deepEqual(creation.tools, ["read", "write"]);
   assert.deepEqual(creation.excludeTools, ["subagent", "message_subagent", "kill_subagent"]);
   assert.equal(creation.messageParentTool.name, "message_parent");
-  assert.deepEqual(Object.keys(creation.messageParentTool.parameters.properties).sort(), ["kind", "message"]);
   assert.equal("messages" in creation, false);
   assert.match(creation.systemPrompt, /^parent system prompt/);
   assert.match(creation.systemPrompt, /fresh subagent, not the parent agent/i);

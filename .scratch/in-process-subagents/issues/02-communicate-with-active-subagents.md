@@ -21,3 +21,5 @@
 ## Answer
 
 Implemented UUID-addressed startup buffering and native steering, child-only progress and blocking-question communication, direct parent answers that preserve Pi’s steering queue, waiting-state status, and invalid-control handling.
+
+Context: [feature map](../map.md).
