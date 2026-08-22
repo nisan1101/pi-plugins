@@ -103,6 +103,12 @@ test("launch returns distinct UUID handles without waiting for child startup", a
 
   const first = await extension.execute({ display_name: "research", prompt: "Inspect the API." });
   const second = await extension.execute({ display_name: "research", prompt: "Inspect the tests." });
+  await extension.execute({ display_name: "research", prompt: "Inspect the docs." });
+  await extension.execute({ display_name: "research", prompt: "Inspect the config." });
+  await assert.rejects(
+    extension.execute({ display_name: "research", prompt: "Do not queue this." }),
+    /limit 4 reached/i,
+  );
 
   assert.equal(first.terminate, true);
   assert.equal(second.terminate, true);
@@ -111,8 +117,11 @@ test("launch returns distinct UUID handles without waiting for child startup", a
   assert.match(first.details.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
   assert.match(second.details.id, /^[0-9a-f-]{36}$/i);
   assert.notEqual(first.details.id, second.details.id);
-  assert.equal(creations.length, 2);
-  assert.match(extension.statuses.at(-1).text, /research#[0-9a-f]{8}.*research#[0-9a-f]{8}/i);
+  assert.equal(creations.length, 4);
+  assert.match(
+    extension.statuses.at(-1).text,
+    /^(research#[0-9a-f]{8} ){2}research#[0-9a-f]{8} \+1$/i,
+  );
 });
 
 // Child construction preserves the project contract without copying parent conversation messages.
