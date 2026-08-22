@@ -47,11 +47,20 @@ interface SubagentsConfig {
 interface ChildMessage {
   role: string;
   content?: unknown;
+  stopReason?: string;
+  errorMessage?: string;
+}
+
+interface ChildSessionEvent {
+  type: string;
+  message?: ChildMessage;
 }
 
 interface ChildSession {
   steer(text: string): Promise<void>;
   prompt(text: string): Promise<void>;
+  abort(): Promise<void>;
+  subscribe(listener: (event: ChildSessionEvent) => void): () => void;
   readonly messages: readonly ChildMessage[];
   getActiveToolNames(): string[];
   shutdown(): Promise<void>;
@@ -75,15 +84,20 @@ type CreateChildSession = (options: ChildSessionOptions) => Promise<ChildSession
 type ChildState =
   | { phase: "starting"; guidance: string[] }
   | { phase: "running"; child: ChildSession }
-  | { phase: "waiting"; child: ChildSession; resolve(answer: string): void }
-  | { phase: "finalizing"; child: ChildSession };
+  | { phase: "waiting"; child: ChildSession; resolve(answer: string): void; reject(error: Error): void }
+  | { phase: "finalizing"; child?: ChildSession };
 
 interface ChildRecord {
   id: string;
   displayName: string;
   prompt: string;
   profile: ModelProfile;
+  model: Model;
+  thinkingLevel: ThinkingLevel;
   state: ChildState;
+  finalization?: Promise<string>;
+  lastAssistant?: ChildMessage;
+  unsubscribe?: () => void;
 }
 
 interface MessageParentDetails {
@@ -129,6 +143,8 @@ async function createPiChildSession(options: ChildSessionOptions): Promise<Child
   return {
     steer: (text) => session.steer(text),
     prompt: (text) => session.prompt(text),
+    abort: () => session.abort(),
+    subscribe: (listener) => session.subscribe((event) => listener(event as ChildSessionEvent)),
     get messages() {
       return session.messages;
     },
@@ -148,8 +164,11 @@ function delegatedTask(record: ChildRecord): string {
 
 const NO_FINAL_TEXT = "_No final textual result._";
 
-function terminalText(messages: readonly ChildMessage[]): string {
-  const assistant = [...messages].reverse().find((message) => message.role === "assistant");
+function terminalAssistant(messages: readonly ChildMessage[]): ChildMessage | undefined {
+  return [...messages].reverse().find((message) => message.role === "assistant");
+}
+
+function assistantText(assistant: ChildMessage | undefined): string {
   if (!assistant || !Array.isArray(assistant.content)) return NO_FINAL_TEXT;
   const text = assistant.content
     .filter((block): block is { type: "text"; text: string } =>
@@ -160,31 +179,54 @@ function terminalText(messages: readonly ChildMessage[]): string {
   return text || NO_FINAL_TEXT;
 }
 
-function resultMarkdown(record: ChildRecord, options: ChildSessionOptions, result: string): string {
+type TerminalStatus = "completed" | "failed" | "killed";
+
+function naturalOutcome(assistant: ChildMessage | undefined): { status: TerminalStatus; error?: string } {
+  const failed = assistant?.stopReason === "error" || assistant?.stopReason === "aborted";
+  return failed
+    ? { status: "failed", error: assistant?.errorMessage ?? "Subagent failed." }
+    : { status: "completed" };
+}
+
+function resultMarkdown(
+  record: ChildRecord,
+  status: TerminalStatus,
+  result: string,
+  error?: string,
+): string {
+  const resultSection =
+    status === "completed"
+      ? `## Result\n\n${result}`
+      : status === "failed"
+        ? `## Error\n\n${error ?? "Unknown error."}\n\n## Partial result\n\n${result}`
+        : `## Partial result\n\n${result}`;
   return `# Subagent Result
 
 - ID: ${record.id}
 - Display name: ${record.displayName}
-- Status: completed
+- Status: ${status}
 - Model profile: ${record.profile}
-- Model: ${options.model.provider}/${options.model.id}
-- Thinking level: ${options.thinkingLevel}
+- Model: ${record.model.provider}/${record.model.id}
+- Thinking level: ${record.thinkingLevel}
 
 ## Delegated task
 
 ${record.prompt}
 
-## Result
-
-${result}
+${resultSection}
 `;
 }
 
-async function writeResult(record: ChildRecord, options: ChildSessionOptions, result: string): Promise<string> {
+async function writeResult(
+  record: ChildRecord,
+  status: TerminalStatus,
+  result: string,
+  error?: string,
+): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "pi-subagent-"));
   const pendingPath = join(directory, ".result.md.pending");
   const resultPath = join(directory, "result.md");
-  await writeFile(pendingPath, resultMarkdown(record, options, result), {
+  await writeFile(pendingPath, resultMarkdown(record, status, result, error), {
     encoding: "utf8",
     mode: 0o600,
     flag: "wx",
@@ -308,19 +350,37 @@ export function createSubagentsExtension({
 }: SubagentsExtensionOptions = {}) {
   return function subagents(pi: ExtensionAPI) {
     const children = new Map<string, ChildRecord>();
+    let controlsOpen = true;
+    let deliveryOpen = true;
+    let deliveryGeneration = 0;
+    let treeStoppedHandles: string[] = [];
     // Pi bypasses its follow-up queue when triggerTurn is false, so preserve order until the parent settles.
-    const pendingParentMessages: Array<{ wakesParent: boolean; send(): void }> = [];
+    const pendingParentMessages: Array<{ generation: number; wakesParent: boolean; send(): void }> = [];
     const flushParentMessages = () => {
+      if (!deliveryOpen) {
+        pendingParentMessages.length = 0;
+        return;
+      }
       while (pendingParentMessages.length > 0) {
         const next = pendingParentMessages.shift()!;
+        if (next.generation !== deliveryGeneration) continue;
         next.send();
         if (next.wakesParent) return;
       }
     };
-    const deliverParentMessage = (ctx: ExtensionContext, wakesParent: boolean, send: () => void) => {
-      if (ctx.isIdle() && pendingParentMessages.length === 0) send();
+    const deliverParentMessage = (
+      ctx: ExtensionContext,
+      wakesParent: boolean,
+      send: () => void,
+      generation = deliveryGeneration,
+) => {
+      if (!deliveryOpen || generation !== deliveryGeneration) return;
+      const guardedSend = () => {
+        if (deliveryOpen && generation === deliveryGeneration) send();
+      };
+      if (ctx.isIdle() && pendingParentMessages.length === 0) guardedSend();
       else {
-        pendingParentMessages.push({ wakesParent, send });
+        pendingParentMessages.push({ generation, wakesParent, send: guardedSend });
         if (ctx.isIdle()) flushParentMessages();
       }
     };
@@ -328,6 +388,16 @@ export function createSubagentsExtension({
 
     const updateStatus = (ctx: ExtensionContext) => {
       if (ctx.mode === "tui") ctx.ui.setStatus("subagents", renderStatus(children.values()));
+    };
+
+    const closeDelivery = () => {
+      deliveryOpen = false;
+      deliveryGeneration += 1;
+      pendingParentMessages.length = 0;
+    };
+
+    const ensureControlsOpen = () => {
+      if (!controlsOpen) throw new Error("Subagent controls are unavailable during parent session transition.");
     };
 
     const createMessageParentTool = (record: ChildRecord, ctx: ExtensionContext) =>
@@ -348,8 +418,8 @@ export function createSubagentsExtension({
           const details: MessageParentDetails = { id: record.id, display_name: record.displayName };
           if (kind === "question") {
             if (state.phase === "waiting") throw new Error("Subagent is already waiting for a parent answer.");
-            const answer = new Promise<string>((resolve) => {
-              record.state = { phase: "waiting", child: state.child, resolve };
+            const answer = new Promise<string>((resolve, reject) => {
+              record.state = { phase: "waiting", child: state.child, resolve, reject };
             });
             updateStatus(ctx);
             deliverParentMessage(ctx, true, () =>
@@ -387,67 +457,189 @@ export function createSubagentsExtension({
         },
       });
 
-    const runChild = async (record: ChildRecord, ctx: ExtensionContext, options: ChildSessionOptions) => {
-      const child = await createChildSession(options);
-      let shutdownAttempted = false;
-      let disposeAttempted = false;
+    const disposeChild = async (child: ChildSession, abort: boolean) => {
+      if (abort) {
+        try {
+          await child.abort();
+        } catch {}
+      }
       try {
-        if (children.get(record.id) !== record) return;
+        await child.shutdown();
+      } catch {}
+      try {
+        child.dispose();
+      } catch {}
+    };
+
+    const claimFinalization = (
+      record: ChildRecord,
+      ctx: ExtensionContext,
+      status: TerminalStatus,
+      child: ChildSession | undefined,
+      error?: string,
+      abort = false,
+    ): Promise<string> | undefined => {
+      if (children.get(record.id) !== record || !isActive(record)) return undefined;
+
+      const previousState = record.state;
+      record.state = { phase: "finalizing", child };
+      if (status === "killed" && previousState.phase === "waiting") {
+        previousState.reject(new Error("Subagent was killed."));
+      }
+      updateStatus(ctx);
+      const generation = deliveryGeneration;
+
+      const finalization = (async () => {
+        if (child && abort) {
+          try {
+            await child.abort();
+          } catch {}
+        }
+        const assistant = record.lastAssistant ?? terminalAssistant(child?.messages ?? []);
+        const result = assistantText(assistant);
+        let resultPath: string;
+        try {
+          resultPath = await writeResult(record, status, result, error);
+        } finally {
+          record.unsubscribe?.();
+          record.unsubscribe = undefined;
+          if (child) await disposeChild(child, false);
+          if (children.get(record.id) === record) children.delete(record.id);
+          updateStatus(ctx);
+        }
+
+        if (status !== "killed") {
+          deliverParentMessage(
+            ctx,
+            true,
+            () =>
+              pi.sendMessage(
+                {
+                  customType: status === "completed" ? "subagent-completed" : "subagent-failed",
+                  content:
+                    `Subagent ${record.displayName} (${record.id}) ${status}.\n\n` +
+                    (error ? `${error}\n\n` : "") +
+                    `${preview(result)}\n\nResult: ${resultPath}`,
+                  display: true,
+                  details: { id: record.id, display_name: record.displayName, result_path: resultPath },
+                },
+                { deliverAs: "followUp", triggerTurn: true },
+              ),
+            generation,
+          );
+        }
+        return resultPath;
+      })();
+      record.finalization = finalization;
+      return finalization;
+    };
+
+    const runChild = async (record: ChildRecord, ctx: ExtensionContext, options: ChildSessionOptions) => {
+      let child: ChildSession | undefined;
+      try {
+        child = await createChildSession(options);
+        if (children.get(record.id) !== record || !isActive(record)) {
+          await disposeChild(child, true);
+          return;
+        }
+
+        record.unsubscribe = child.subscribe((event) => {
+          if (children.get(record.id) !== record) return;
+          if (event.type === "message_end" && event.message?.role === "assistant") {
+            record.lastAssistant = event.message;
+          }
+          if (event.type === "agent_settled" && isActive(record)) {
+            const { status, error } = naturalOutcome(
+              record.lastAssistant ?? terminalAssistant(child!.messages),
+            );
+            void claimFinalization(record, ctx, status, child, error)?.catch(() => {});
+          }
+        });
+
         const expectedTools = [...options.tools, "message_parent"];
-        const missingTools = expectedTools.filter((name) => !child.getActiveToolNames().includes(name));
+        const missingTools = expectedTools.filter((name) => !child!.getActiveToolNames().includes(name));
         if (missingTools.length > 0) {
           throw new Error(`Child could not load active tools: ${missingTools.join(", ")}`);
         }
+
         const startup = record.state;
         if (startup.phase !== "starting") return;
         const prompt = child.prompt(delegatedTask(record));
-        const startupSteering = startup.guidance.map((message) => child.steer(message));
+        const startupSteering = startup.guidance.map((message) => child!.steer(message));
         record.state = { phase: "running", child };
         await Promise.all(startupSteering);
         await prompt;
-        if (children.get(record.id) !== record) return;
+        if (children.get(record.id) !== record || !isActive(record)) return;
 
-        record.state = { phase: "finalizing", child };
-        updateStatus(ctx);
-        const result = terminalText(child.messages);
-        const resultPath = await writeResult(record, options, result);
-        shutdownAttempted = true;
-        await child.shutdown();
-        disposeAttempted = true;
-        child.dispose();
-        children.delete(record.id);
-        updateStatus(ctx);
-        deliverParentMessage(ctx, true, () =>
-          pi.sendMessage(
-            {
-              customType: "subagent-completed",
-              content:
-                `Subagent ${record.displayName} (${record.id}) completed.\n\n` +
-                `${preview(result)}\n\nResult: ${resultPath}`,
-              display: true,
-              details: { id: record.id, display_name: record.displayName, result_path: resultPath },
-            },
-            { deliverAs: "followUp", triggerTurn: true },
-          ),
+        const { status, error } = naturalOutcome(
+          record.lastAssistant ?? terminalAssistant(child.messages),
         );
+        await claimFinalization(record, ctx, status, child, error);
       } catch (error) {
-        if (children.get(record.id) === record) {
-          record.state = { phase: "finalizing", child };
-          updateStatus(ctx);
+        if (children.get(record.id) === record && isActive(record)) {
+          await claimFinalization(record, ctx, "failed", child, errorMessage(error), true);
         }
-        if (!shutdownAttempted) {
-          try {
-            await child.shutdown();
-          } catch {}
-        }
-        if (!disposeAttempted) {
-          try {
-            child.dispose();
-          } catch {}
-        }
-        throw error;
       }
     };
+
+    const cleanupOwnedChildren = async (ctx: ExtensionContext) => {
+      controlsOpen = false;
+      closeDelivery();
+
+      const childCleanups: ChildSession[] = [];
+      const finalizations: Promise<string>[] = [];
+      for (const record of children.values()) {
+        const state = record.state;
+        if (state.phase === "finalizing") {
+          if (record.finalization) finalizations.push(record.finalization);
+          continue;
+        }
+        if (state.phase === "waiting") {
+          state.reject(new Error("The parent session is no longer available."));
+        }
+        record.unsubscribe?.();
+        record.unsubscribe = undefined;
+        const child = state.phase === "starting" ? undefined : state.child;
+        record.state = { phase: "finalizing", child };
+        if (child) childCleanups.push(child);
+      }
+      children.clear();
+      updateStatus(ctx);
+
+      await Promise.allSettled([
+        ...childCleanups.map((child) => disposeChild(child, true)),
+        ...finalizations,
+      ]);
+    };
+
+    pi.on("session_shutdown", (_event, ctx) => cleanupOwnedChildren(ctx));
+
+    pi.on("session_before_tree", async (_event, ctx) => {
+      treeStoppedHandles = [...children.values()].map(
+        ({ displayName, id }) => `${displayName}#${id.slice(0, 8)}`,
+      );
+      await cleanupOwnedChildren(ctx);
+    });
+
+    pi.on("session_tree", (_event, _ctx) => {
+      if (treeStoppedHandles.length > 0) {
+        const stopped = treeStoppedHandles;
+        pi.sendMessage(
+          {
+            customType: "subagents-tree-cancelled",
+            content:
+              `Tree navigation stopped subagents: ${stopped.join(", ")}.\n\n` +
+              "Existing workspace changes were not reverted.",
+            display: true,
+            details: { stopped },
+          },
+          { deliverAs: "followUp", triggerTurn: false },
+        );
+      }
+      treeStoppedHandles = [];
+      controlsOpen = true;
+      deliveryOpen = true;
+    });
 
     pi.registerTool({
       name: "message_subagent",
@@ -458,6 +650,7 @@ export function createSubagentsExtension({
         message: Type.String({ minLength: 1 }),
       }),
       async execute(_toolCallId, { id, message }, _signal, _onUpdate, ctx) {
+        ensureControlsOpen();
         if (!UUID_PATTERN.test(id)) throw new Error("id must be a full subagent UUID.");
         if (!message.trim()) throw new Error("message must not be empty.");
         const record = children.get(id);
@@ -490,6 +683,38 @@ export function createSubagentsExtension({
     });
 
     pi.registerTool({
+      name: "kill_subagent",
+      label: "Kill Subagent",
+      description:
+        "Cooperatively stop one active subagent by full UUID. This cannot force-stop synchronous code or extensions that ignore cancellation.",
+      parameters: Type.Object({ id: Type.String() }),
+      async execute(_toolCallId, { id }, _signal, _onUpdate, ctx) {
+        ensureControlsOpen();
+        if (!UUID_PATTERN.test(id)) throw new Error("id must be a full subagent UUID.");
+        const record = children.get(id);
+        if (!record || record.state.phase === "finalizing") {
+          throw new Error(`No active subagent with UUID ${id}.`);
+        }
+
+        const state = record.state;
+        const child = state.phase === "starting" ? undefined : state.child;
+        const finalization = claimFinalization(record, ctx, "killed", child, undefined, true);
+        if (!finalization) throw new Error(`No active subagent with UUID ${id}.`);
+        const resultPath = await finalization;
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Cooperatively killed ${record.displayName} (${id}). Result: ${resultPath}`,
+            },
+          ],
+          details: { id, display_name: record.displayName, result_path: resultPath },
+        };
+      },
+    });
+
+    pi.registerTool({
       name: "subagent",
       label: "Subagent",
       description:
@@ -500,6 +725,7 @@ export function createSubagentsExtension({
         model_profile: Type.Optional(StringEnum(PROFILE_NAMES)),
       }),
       async execute(_toolCallId, { display_name, prompt, model_profile = "inherit" }, _signal, _onUpdate, ctx) {
+        ensureControlsOpen();
         if (!display_name.trim()) throw new Error("display_name must not be empty.");
         if (!prompt.trim()) throw new Error("prompt must not be empty.");
 
@@ -523,6 +749,8 @@ export function createSubagentsExtension({
           displayName: display_name,
           prompt,
           profile: model_profile,
+          model: resolvedProfile.model,
+          thinkingLevel: resolvedProfile.thinkingLevel,
           state: { phase: "starting", guidance: [] },
         };
         children.set(record.id, record);
@@ -539,20 +767,6 @@ export function createSubagentsExtension({
           tools,
           messageParentTool: createMessageParentTool(record, ctx),
           excludeTools: ORCHESTRATION_TOOLS,
-        }).catch((error) => {
-          children.delete(record.id);
-          updateStatus(ctx);
-          deliverParentMessage(ctx, true, () =>
-            pi.sendMessage(
-              {
-                customType: "subagent-failed",
-                content: `Subagent ${record.displayName} (${record.id}) failed to start: ${errorMessage(error)}`,
-                display: true,
-                details: { id: record.id, display_name: record.displayName },
-              },
-              { deliverAs: "followUp", triggerTurn: true },
-            ),
-          );
         });
 
         return {

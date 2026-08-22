@@ -10,10 +10,12 @@ import { createSubagentsExtension } from "../extensions/subagents.ts";
 
 function deferred() {
   let resolve;
-  const promise = new Promise((done) => {
+  let reject;
+  const promise = new Promise((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 const NAMED_PROFILES = ["low", "medium", "high", "xhigh"];
@@ -24,6 +26,10 @@ function fakeChild(overrides = {}) {
     getActiveToolNames: () => ["read", "write", "message_parent"],
     async steer() {},
     async prompt() {},
+    subscribe() {
+      return () => {};
+    },
+    async abort() {},
     async shutdown() {},
     dispose() {},
     ...overrides,
@@ -109,14 +115,17 @@ async function loadExtension(t, createChildSession, overrides = {}) {
     statuses,
     warnings,
     sent,
-    async emit(event) {
-      for (const handler of handlers.get(event) ?? []) await handler({ type: event }, context);
+    async emit(event, payload = {}) {
+      for (const handler of handlers.get(event) ?? []) {
+        await handler({ type: event, ...payload }, context);
+      }
     },
     setIdle(value) {
       parentIdle = value;
     },
     execute: (params) => executeTool("subagent", params),
     message: (params) => executeTool("message_subagent", params),
+    kill: (params) => executeTool("kill_subagent", params),
   };
 }
 
@@ -327,6 +336,146 @@ test("parent answer resolves one waiting question and later messages resume stee
   assert.deepEqual(steered, ["Queued before the question.", "Continue."]);
 });
 
+// Explicit kill owns the terminal result, rejects a blocked question, and never sends a second wake.
+test("kill aborts a waiting child and returns its private partial result", async (t) => {
+  const run = deferred();
+  const promptStarted = deferred();
+  const lifecycle = [];
+  const child = fakeChild({
+    messages: [
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "hidden reasoning" },
+          { type: "text", text: "Work completed before cancellation." },
+        ],
+      },
+    ],
+    async prompt() {
+      promptStarted.resolve();
+      await run.promise;
+    },
+    async abort() {
+      lifecycle.push("abort");
+      run.resolve();
+    },
+    async shutdown() {
+      lifecycle.push("shutdown");
+    },
+    dispose() {
+      lifecycle.push("dispose");
+    },
+  });
+  let creation;
+  const extension = await loadExtension(t, async (options) => {
+    creation = options;
+    return child;
+  });
+  const launch = await extension.execute({ display_name: "cancelled", prompt: "Work until stopped." });
+  await promptStarted.promise;
+
+  const question = callTool(creation.messageParentTool, {
+    kind: "question",
+    message: "Should I continue?",
+  });
+  const questionRejected = assert.rejects(question, /killed/i);
+  await assert.rejects(extension.kill({ id: launch.details.id.slice(0, 8) }), /full.*uuid/i);
+  const killed = await extension.kill({ id: launch.details.id });
+  await questionRejected;
+
+  assert.deepEqual(lifecycle, ["abort", "shutdown", "dispose"]);
+  assert.equal(killed.details.id, launch.details.id);
+  assert.equal(killed.details.display_name, "cancelled");
+  assert.match(killed.content[0].text, /cooperative/i);
+  assert.match(killed.content[0].text, /result\.md/);
+  assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
+  assert.equal(extension.sent.length, 1);
+  assert.equal(extension.sent[0].message.customType, "subagent-question");
+  await assert.rejects(extension.kill({ id: launch.details.id }), /no active subagent/i);
+  await assert.rejects(extension.message({ id: launch.details.id, message: "Too late." }), /no active subagent/i);
+
+  const resultPath = killed.details.result_path;
+  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
+  assert.equal((await stat(resultPath)).mode & 0o777, 0o600);
+  const result = await readFile(resultPath, "utf8");
+  assert.match(result, /Status: killed/);
+  assert.match(result, /## Partial result\n\nWork completed before cancellation\./);
+  assert.doesNotMatch(result, /hidden reasoning/);
+});
+
+// A kill claimed before prompt failure remains the only terminal outcome and cleanup owner.
+test("kill wins a simultaneous natural failure without duplicate cleanup or notification", async (t) => {
+  const promptStarted = deferred();
+  const lifecycle = [];
+  let rejectPrompt;
+  const child = fakeChild({
+    messages: [{ role: "assistant", content: [{ type: "text", text: "Partial work." }] }],
+    async prompt() {
+      promptStarted.resolve();
+      await new Promise((_, reject) => {
+        rejectPrompt = reject;
+      });
+    },
+    async abort() {
+      lifecycle.push("abort");
+      rejectPrompt(new Error("aborted by parent"));
+    },
+    async shutdown() {
+      lifecycle.push("shutdown");
+    },
+    dispose() {
+      lifecycle.push("dispose");
+    },
+  });
+  const extension = await loadExtension(t, async () => child);
+  const launch = await extension.execute({ display_name: "racer", prompt: "Race cancellation." });
+  await promptStarted.promise;
+
+  const killed = await extension.kill({ id: launch.details.id });
+  await Promise.resolve();
+
+  assert.deepEqual(lifecycle, ["abort", "shutdown", "dispose"]);
+  assert.equal(extension.sent.length, 0);
+  const resultPath = killed.details.result_path;
+  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
+  const result = await readFile(resultPath, "utf8");
+  assert.match(result, /Status: killed/);
+  assert.doesNotMatch(result, /aborted by parent/);
+});
+
+// Killing during construction returns immediately and disposes the child if startup later finishes.
+test("kill claims a starting child and late startup is cleaned silently", async (t) => {
+  const startup = deferred();
+  const lifecycle = [];
+  const child = fakeChild({
+    async abort() {
+      lifecycle.push("abort");
+    },
+    async shutdown() {
+      lifecycle.push("shutdown");
+    },
+    dispose() {
+      lifecycle.push("dispose");
+    },
+  });
+  const extension = await loadExtension(t, () => startup.promise);
+  const launch = await extension.execute({ display_name: "starting", prompt: "Start slowly." });
+
+  const killed = await extension.kill({ id: launch.details.id });
+  const resultPath = killed.details.result_path;
+  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
+  const result = await readFile(resultPath, "utf8");
+  assert.match(result, /Status: killed/);
+  assert.match(result, /## Partial result\n\n_No final textual result\._/);
+  assert.deepEqual(lifecycle, []);
+  assert.equal(extension.sent.length, 0);
+
+  startup.resolve(child);
+  await waitFor(() => lifecycle.includes("dispose"));
+  assert.deepEqual(lifecycle, ["abort", "shutdown", "dispose"]);
+  assert.equal(extension.sent.length, 0);
+});
+
 // Child construction preserves the project contract without copying parent conversation messages.
 test("launch creates one fresh child with inherited capabilities and a delimited task", async (t) => {
   const run = deferred();
@@ -497,8 +646,91 @@ test("natural completion writes a private result, disposes the child, and wakes 
   );
 });
 
+// Terminal message events remain the source of the focused result even when the session view lags.
+test("terminal assistant event supplies the completed result text", async (t) => {
+  let listener;
+  const child = fakeChild({
+    subscribe(next) {
+      listener = next;
+      return () => {};
+    },
+    async prompt() {
+      listener({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "hidden" },
+            { type: "text", text: "Captured terminal text." },
+          ],
+        },
+      });
+    },
+  });
+  const extension = await loadExtension(t, async () => child);
+
+  await extension.execute({ display_name: "event-result", prompt: "Capture the event." });
+  await waitFor(() => extension.sent.length === 1);
+
+  assert.match(extension.sent[0].message.content, /Captured terminal text\./);
+  const resultPath = extension.sent[0].message.details.result_path;
+  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
+  const result = await readFile(resultPath, "utf8");
+  assert.match(result, /Captured terminal text\./);
+  assert.doesNotMatch(result, /hidden/);
+});
+
+// Provider failures retain their visible partial answer without leaking the child transcript.
+test("natural failure writes focused error metadata and wakes the parent once", async (t) => {
+  const lifecycle = [];
+  const child = fakeChild({
+    messages: [
+      { role: "user", content: [{ type: "text", text: "private transcript" }] },
+      {
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "provider failed",
+        provider: "private-provider",
+        content: [
+          { type: "thinking", thinking: "hidden reasoning" },
+          { type: "text", text: "Available partial result." },
+          { type: "toolCall", name: "read", arguments: { path: "secret" } },
+        ],
+      },
+    ],
+    async shutdown() {
+      lifecycle.push("shutdown");
+    },
+    dispose() {
+      lifecycle.push("dispose");
+    },
+  });
+  const extension = await loadExtension(t, async () => child);
+
+  const launch = await extension.execute({ display_name: "failing", prompt: "Try the provider." });
+  await waitFor(() => extension.sent.length === 1);
+
+  assert.deepEqual(lifecycle, ["shutdown", "dispose"]);
+  assert.equal(extension.sent.length, 1);
+  const [{ message, options }] = extension.sent;
+  assert.equal(message.customType, "subagent-failed");
+  assert.equal(message.details.id, launch.details.id);
+  assert.equal(message.details.display_name, "failing");
+  assert.deepEqual(options, { deliverAs: "followUp", triggerTurn: true });
+  assert.match(message.content, /provider failed/);
+  assert.match(message.content, /Available partial result\./);
+
+  const resultPath = message.details.result_path;
+  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
+  const result = await readFile(resultPath, "utf8");
+  assert.match(result, /Status: failed/);
+  assert.match(result, /## Error\n\nprovider failed/);
+  assert.match(result, /## Partial result\n\nAvailable partial result\./);
+  assert.doesNotMatch(result, /hidden reasoning|toolCall|secret|private-provider|private transcript/);
+});
+
 // Once terminal finalization begins, the UUID stops accepting controls and leaves active status.
-test("finalizing child rejects parent messages before disposal", async (t) => {
+test("completion wins kill and releases its slot before disposal", async (t) => {
   const shutdownStarted = deferred();
   const allowShutdown = deferred();
   const steered = [];
@@ -512,7 +744,10 @@ test("finalizing child rejects parent messages before disposal", async (t) => {
       await allowShutdown.promise;
     },
   });
-  const extension = await loadExtension(t, async () => child);
+  const replacementStartup = deferred();
+  let creations = 0;
+  const extension = await loadExtension(t, async () => (creations++ === 0 ? child : replacementStartup.promise));
+  await writeFile(join(extension.agentDir, "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
   const launch = await extension.execute({ display_name: "finalizer", prompt: "Finish." });
   await shutdownStarted.promise;
 
@@ -522,11 +757,57 @@ test("finalizing child rejects parent messages before disposal", async (t) => {
   );
   assert.deepEqual(steered, []);
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
+  await assert.rejects(extension.kill({ id: launch.details.id }), /no active subagent/i);
+  const replacement = await extension.execute({ display_name: "replacement", prompt: "Use the free slot." });
+  assert.match(extension.statuses.at(-1).text, /^replacement#[0-9a-f]{8}$/i);
+  assert.notEqual(replacement.details.id, launch.details.id);
 
   allowShutdown.resolve();
   await waitFor(() => extension.sent.length === 1);
   const resultPath = extension.sent[0].message.details.result_path;
   t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
+});
+
+// The terminal event claims completion before the prompt promise yields back to orchestration.
+test("terminal completion event beats a later kill call", async (t) => {
+  const promptStarted = deferred();
+  const allowPromptReturn = deferred();
+  let shutdownBegan = false;
+  const allowShutdown = deferred();
+  let listener;
+  const child = fakeChild({
+    subscribe(next) {
+      listener = next;
+      return () => {};
+    },
+    async prompt() {
+      promptStarted.resolve();
+      await allowPromptReturn.promise;
+    },
+    async shutdown() {
+      shutdownBegan = true;
+      await allowShutdown.promise;
+    },
+  });
+  const extension = await loadExtension(t, async () => child);
+  const launch = await extension.execute({ display_name: "event-winner", prompt: "Finish by event." });
+  await promptStarted.promise;
+
+  listener({
+    type: "message_end",
+    message: { role: "assistant", content: [{ type: "text", text: "Event won." }] },
+  });
+  listener({ type: "agent_settled" });
+  await waitFor(() => shutdownBegan);
+
+  await assert.rejects(extension.kill({ id: launch.details.id }), /no active subagent/i);
+  allowShutdown.resolve();
+  await waitFor(() => extension.sent.length === 1);
+  allowPromptReturn.resolve();
+
+  const resultPath = extension.sent[0].message.details.result_path;
+  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
+  assert.match(await readFile(resultPath, "utf8"), /Status: completed[\s\S]*Event won\./);
 });
 
 // Configuration-equivalent inheritance fails visibly instead of silently dropping a parent work tool.
@@ -558,6 +839,209 @@ test("startup failure disposes a child that cannot rediscover every active work 
   assert.match(extension.sent[0].message.content, new RegExp(launch.details.id));
   assert.match(extension.sent[0].message.content, /could not load active tools: write/i);
   assert.deepEqual(extension.sent[0].options, { deliverAs: "followUp", triggerTurn: true });
+  const resultPath = extension.sent[0].message.details.result_path;
+  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
+  const result = await readFile(resultPath, "utf8");
+  assert.match(result, /Status: failed/);
+  assert.match(result, /## Error\n\nChild could not load active tools: write/);
+  assert.match(result, /## Partial result\n\n_No final textual result\._/);
+});
+
+// Parent lifecycle cleanup closes delivery before aborting every owned child and is idempotent.
+test("session shutdown silently cancels active, waiting, starting, and finalizing children", async (t) => {
+  const runs = [deferred(), deferred()];
+  const starts = [deferred(), deferred()];
+  const lifecycle = [[], [], [], []];
+  const creations = [];
+  const activeChildren = [0, 1].map((index) =>
+    fakeChild({
+      async prompt() {
+        starts[index].resolve();
+        await runs[index].promise;
+      },
+      async abort() {
+        lifecycle[index].push("abort");
+        if (index === 0) runs[index].reject(new Error("late child failure"));
+        else runs[index].resolve();
+      },
+      async shutdown() {
+        lifecycle[index].push("shutdown");
+      },
+      dispose() {
+        lifecycle[index].push("dispose");
+      },
+    }),
+  );
+  const finalShutdownStarted = deferred();
+  const allowFinalShutdown = deferred();
+  const finalizingChild = fakeChild({
+    messages: [{ role: "assistant", content: [{ type: "text", text: "Should stay unpublished." }] }],
+    async shutdown() {
+      lifecycle[2].push("shutdown");
+      finalShutdownStarted.resolve();
+      await allowFinalShutdown.promise;
+    },
+    dispose() {
+      lifecycle[2].push("dispose");
+    },
+  });
+  const lateStartup = deferred();
+  const lateChild = fakeChild({
+    async abort() {
+      lifecycle[3].push("abort");
+    },
+    async shutdown() {
+      lifecycle[3].push("shutdown");
+    },
+    dispose() {
+      lifecycle[3].push("dispose");
+    },
+  });
+  let created = 0;
+  const extension = await loadExtension(
+    t,
+    async (options) => {
+      creations.push(options);
+      const index = created++;
+      if (index < 2) return activeChildren[index];
+      if (index === 2) return finalizingChild;
+      return lateStartup.promise;
+    },
+    { parentIdle: false },
+  );
+
+  const running = await extension.execute({ display_name: "running", prompt: "Keep running." });
+  const waiting = await extension.execute({ display_name: "waiting", prompt: "Ask first." });
+  await Promise.all(starts.map(({ promise }) => promise));
+  await callTool(creations[0].messageParentTool, { kind: "progress", message: "Queued progress." });
+  const question = callTool(creations[1].messageParentTool, {
+    kind: "question",
+    message: "Queued question?",
+  });
+  const questionRejected = assert.rejects(question, /no longer available/i);
+  await extension.execute({ display_name: "finalizing", prompt: "Finish now." });
+  await finalShutdownStarted.promise;
+  await extension.execute({ display_name: "starting", prompt: "Still starting." });
+  assert.equal(extension.sent.length, 0);
+
+  const shutdown = extension.emit("session_shutdown", { reason: "reload" });
+  await waitFor(() => extension.statuses.at(-1)?.text === undefined);
+  await questionRejected;
+  await assert.rejects(extension.message({ id: running.details.id, message: "Too late." }), /unavailable/i);
+  await assert.rejects(extension.kill({ id: waiting.details.id }), /unavailable/i);
+  await assert.rejects(
+    extension.execute({ display_name: "new", prompt: "Too late." }),
+    /unavailable/i,
+  );
+  allowFinalShutdown.resolve();
+  await shutdown;
+
+  lateStartup.resolve(lateChild);
+  await waitFor(() => lifecycle[3].includes("dispose"));
+  await assert.rejects(
+    callTool(creations[0].messageParentTool, { kind: "progress", message: "Late progress." }),
+    /no longer available/i,
+  );
+  extension.setIdle(true);
+  await extension.emit("agent_settled");
+  await extension.emit("session_shutdown", { reason: "quit" });
+
+  assert.deepEqual(lifecycle, [
+    ["abort", "shutdown", "dispose"],
+    ["abort", "shutdown", "dispose"],
+    ["shutdown", "dispose"],
+    ["abort", "shutdown", "dispose"],
+  ]);
+  assert.equal(extension.sent.length, 0);
+  assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
+});
+
+// A committed tree transition stops old-timeline children before navigation and warns without waking.
+test("tree navigation closes the old timeline and reopens controls after one cancellation notice", async (t) => {
+  const runs = [deferred(), deferred()];
+  const starts = [deferred(), deferred()];
+  const creations = [];
+  const steered = [];
+  const children = [0, 1].map((index) =>
+    fakeChild({
+      async prompt() {
+        starts[index].resolve();
+        await runs[index].promise;
+      },
+      async steer(message) {
+        steered.push(message);
+      },
+      async abort() {
+        runs[index].resolve();
+      },
+    }),
+  );
+  const replacementStartup = deferred();
+  let created = 0;
+  const extension = await loadExtension(
+    t,
+    async (options) => {
+      creations.push(options);
+      return created < 2 ? children[created++] : replacementStartup.promise;
+    },
+    { parentIdle: false },
+  );
+  const first = await extension.execute({ display_name: "first", prompt: "Old branch one." });
+  const second = await extension.execute({ display_name: "second", prompt: "Old branch two." });
+  await Promise.all(starts.map(({ promise }) => promise));
+
+  // No tree lifecycle event means opening, cancelling, or selecting the current leaf changes nothing.
+  await extension.message({ id: first.details.id, message: "Still on this leaf." });
+  assert.deepEqual(steered, ["Still on this leaf."]);
+  const question = callTool(creations[1].messageParentTool, {
+    kind: "question",
+    message: "Should this survive navigation?",
+  });
+  const questionRejected = assert.rejects(question, /no longer available/i);
+
+  const beforeTree = extension.emit("session_before_tree", {
+    preparation: { targetId: "target", oldLeafId: "old" },
+    signal: new AbortController().signal,
+  });
+  await Promise.resolve();
+  await assert.rejects(extension.message({ id: first.details.id, message: "Closed." }), /unavailable/i);
+  await assert.rejects(extension.kill({ id: second.details.id }), /unavailable/i);
+  await questionRejected;
+  await beforeTree;
+  assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
+  assert.equal(extension.sent.length, 0);
+  await assert.rejects(
+    callTool(creations[0].messageParentTool, { kind: "progress", message: "Late old-branch progress." }),
+    /no longer available/i,
+  );
+
+  await extension.emit("session_tree", { newLeafId: "new", oldLeafId: "old" });
+  assert.equal(extension.sent.length, 1);
+  const [{ message, options }] = extension.sent;
+  assert.equal(message.customType, "subagents-tree-cancelled");
+  assert.deepEqual(options, { deliverAs: "followUp", triggerTurn: false });
+  assert.match(message.content, new RegExp(`first#${first.details.id.slice(0, 8)}`));
+  assert.match(message.content, new RegExp(`second#${second.details.id.slice(0, 8)}`));
+  assert.match(message.content, /workspace changes were not reverted/i);
+
+  const replacement = await extension.execute({ display_name: "replacement", prompt: "New branch work." });
+  assert.notEqual(replacement.details.id, first.details.id);
+});
+
+// Navigating with no owned child emits no warning but still restores the tool surface.
+test("empty tree navigation emits no notice and permits later launches", async (t) => {
+  const startup = deferred();
+  const extension = await loadExtension(t, () => startup.promise);
+
+  await extension.emit("session_before_tree", {
+    preparation: { targetId: "target", oldLeafId: "old" },
+    signal: new AbortController().signal,
+  });
+  await extension.emit("session_tree", { newLeafId: "new", oldLeafId: "old" });
+
+  assert.equal(extension.sent.length, 0);
+  const launch = await extension.execute({ display_name: "new", prompt: "Start after navigation." });
+  assert.equal(launch.details.display_name, "new");
 });
 
 // The configured active limit rejects instead of queueing and renders a compact actionable frontier.
