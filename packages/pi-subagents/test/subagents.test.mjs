@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+
+import { fauxProvider } from "@earendil-works/pi-ai";
 
 import { createSubagentsExtension } from "../extensions/subagents.ts";
 
@@ -12,6 +14,19 @@ function deferred() {
     resolve = done;
   });
   return { promise, resolve };
+}
+
+const NAMED_PROFILES = ["low", "medium", "high", "xhigh"];
+
+function fakeChild(overrides = {}) {
+  return {
+    messages: [],
+    getActiveToolNames: () => ["read", "write"],
+    async prompt() {},
+    async shutdown() {},
+    dispose() {},
+    ...overrides,
+  };
 }
 
 async function loadExtension(t, createChildSession, overrides = {}) {
@@ -105,17 +120,13 @@ test("launch creates one fresh child with inherited capabilities and a delimited
   const run = deferred();
   const promptStarted = deferred();
   const prompts = [];
-  const child = {
-    messages: [],
-    getActiveToolNames: () => ["read", "write"],
+  const child = fakeChild({
     async prompt(text) {
       prompts.push(text);
       promptStarted.resolve();
       await run.promise;
     },
-    async shutdown() {},
-    dispose() {},
-  };
+  });
   let creation;
   const extension = await loadExtension(t, async (options) => {
     creation = options;
@@ -154,7 +165,7 @@ test("configured model profiles select their model and thinking level", async (t
   const startup = deferred();
   const creations = [];
   const models = new Map(
-    ["low", "medium", "high", "xhigh"].map((name) => [
+    NAMED_PROFILES.map((name) => [
       `test/${name}-model`,
       { provider: "test", id: `${name}-model`, reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
     ]),
@@ -180,7 +191,7 @@ test("configured model profiles select their model and thinking level", async (t
     join(extension.agentDir, "subagents.json"),
     JSON.stringify({
       profiles: Object.fromEntries(
-        ["low", "medium", "high", "xhigh"].map((name) => [
+        NAMED_PROFILES.map((name) => [
           name,
           { provider: "test", model: `${name}-model`, thinkingLevel: name },
         ]),
@@ -188,7 +199,7 @@ test("configured model profiles select their model and thinking level", async (t
     }),
   );
 
-  for (const name of ["low", "medium", "high", "xhigh"]) {
+  for (const name of NAMED_PROFILES) {
     await extension.execute({ display_name: name, prompt: `Run ${name}.`, model_profile: name });
   }
 
@@ -214,7 +225,7 @@ async function waitFor(predicate) {
 // Successful completion publishes one durable focused result only after child disposal.
 test("natural completion writes a private result, disposes the child, and wakes the parent once", async (t) => {
   const lifecycle = [];
-  const child = {
+  const child = fakeChild({
     messages: [
       { role: "user", content: [{ type: "text", text: "transcript text must stay private" }] },
       {
@@ -228,15 +239,13 @@ test("natural completion writes a private result, disposes the child, and wakes 
         ],
       },
     ],
-    getActiveToolNames: () => ["read", "write"],
-    async prompt() {},
     async shutdown() {
       lifecycle.push("shutdown");
     },
     dispose() {
       lifecycle.push("dispose");
     },
-  };
+  });
   const extension = await loadExtension(t, async () => child);
 
   const launch = await extension.execute({ display_name: "finisher", prompt: "Return the exact finding." });
@@ -274,8 +283,7 @@ test("natural completion writes a private result, disposes the child, and wakes 
 test("startup failure disposes a child that cannot rediscover every active work tool", async (t) => {
   const lifecycle = [];
   let prompted = false;
-  const child = {
-    messages: [],
+  const child = fakeChild({
     getActiveToolNames: () => ["read"],
     async prompt() {
       prompted = true;
@@ -286,7 +294,7 @@ test("startup failure disposes a child that cannot rediscover every active work 
     dispose() {
       lifecycle.push("dispose");
     },
-  };
+  });
   const extension = await loadExtension(t, async () => child);
 
   const launch = await extension.execute({ display_name: "missing-tool", prompt: "Use write." });
@@ -320,19 +328,24 @@ test("global concurrency configuration bounds active launches", async (t) => {
   );
   assert.equal(creations, 2);
 
-  const fallback = await loadExtension(t, () => startup.promise);
-  await writeFile(join(fallback.agentDir, "subagents.json"), JSON.stringify({ maxConcurrent: 0 }));
-  for (const name of ["a", "b", "c", "d"]) {
-    await fallback.execute({ display_name: name, prompt: name });
+  for (const invalidLimit of [0, -1, 1.5, "4"]) {
+    const fallback = await loadExtension(t, () => startup.promise);
+    await writeFile(
+      join(fallback.agentDir, "subagents.json"),
+      JSON.stringify({ maxConcurrent: invalidLimit }),
+    );
+    for (const name of ["a", "b", "c", "d"]) {
+      await fallback.execute({ display_name: name, prompt: name });
+    }
+    await assert.rejects(fallback.execute({ display_name: "e", prompt: "e" }), /limit 4 reached/i);
+    assert.ok(
+      fallback.warnings.some(
+        ({ message, type }) =>
+          message === "Invalid maxConcurrent in subagents.json; using 4." && type === "warning",
+      ),
+    );
+    assert.match(fallback.statuses.at(-1).text, /^a#[0-9a-f]{8} b#[0-9a-f]{8} c#[0-9a-f]{8} \+1$/i);
   }
-  await assert.rejects(fallback.execute({ display_name: "e", prompt: "e" }), /limit 4 reached/i);
-  assert.ok(fallback.warnings.length > 0);
-  assert.ok(
-    fallback.warnings.every(
-      ({ message, type }) => message === "Invalid maxConcurrent in subagents.json; using 4." && type === "warning",
-    ),
-  );
-  assert.match(fallback.statuses.at(-1).text, /^a#[0-9a-f]{8} b#[0-9a-f]{8} c#[0-9a-f]{8} \+1$/i);
 });
 
 // Invalid launch policy is rejected before identity, status, or child resources are allocated.
@@ -389,13 +402,9 @@ test("invalid and unavailable profiles leave no active child", async (t) => {
 
 // Footer presentation is optional and an empty terminal answer still produces an explicit result.
 test("fresh launch completes without TUI status or final text", async (t) => {
-  const child = {
+  const child = fakeChild({
     messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "not visible" }] }],
-    getActiveToolNames: () => ["read", "write"],
-    async prompt() {},
-    async shutdown() {},
-    dispose() {},
-  };
+  });
   const extension = await loadExtension(t, async () => child, { mode: "print" });
 
   await extension.execute({ display_name: "headless", prompt: "Check without a TUI." });
@@ -406,4 +415,70 @@ test("fresh launch completes without TUI status or final text", async (t) => {
   t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
   assert.match(await readFile(resultPath, "utf8"), /_No final textual result\._/);
   assert.match(extension.sent[0].message.content, /_No final textual result\._/);
+});
+
+// The production adapter rediscovers configured child extensions and skills through Pi's public SDK.
+test("production child session rediscovers configured resources and runs extension lifecycle", async (t) => {
+  const projectDir = await mkdtemp(join(tmpdir(), "pi-subagent-project-"));
+  t.after(() => rm(projectDir, { recursive: true, force: true }));
+  const parentFaux = fauxProvider({ provider: "subagent-test", models: [{ id: "child-model" }] });
+  const extension = await loadExtension(t, undefined, {
+    activeTools: ["read", "child_probe", "subagent"],
+    cwd: projectDir,
+    mode: "print",
+    model: parentFaux.getModel(),
+    thinkingLevel: "off",
+    systemPrompt: "parent system marker",
+  });
+  const childExtensionPath = join(extension.agentDir, "child-extension.mjs");
+  const skillDir = join(extension.agentDir, "skills", "rediscovered");
+  const shutdownMarker = join(extension.agentDir, "child-shutdown");
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(
+    join(skillDir, "SKILL.md"),
+    "---\nname: rediscovered\ndescription: Rediscovered skill marker.\n---\nUse the rediscovered skill.\n",
+  );
+  await writeFile(
+    childExtensionPath,
+    `import { writeFileSync } from "node:fs";
+import { Type, fauxAssistantMessage, fauxProvider } from ${JSON.stringify(import.meta.resolve("@earendil-works/pi-ai"))};
+
+let started = false;
+const faux = fauxProvider({ provider: "subagent-test", models: [{ id: "child-model" }] });
+faux.setResponses([(context) => fauxAssistantMessage(JSON.stringify({
+  started,
+  skill: context.systemPrompt?.includes("Rediscovered skill marker") ?? false,
+  tool: context.tools?.some(({ name }) => name === "child_probe") ?? false,
+}))]);
+
+export default function childProbe(pi) {
+  pi.registerProvider(faux.provider);
+  pi.registerTool({
+    name: "child_probe",
+    label: "Child probe",
+    description: "Test child resource rediscovery.",
+    parameters: Type.Object({}),
+    async execute() {
+      return { content: [{ type: "text", text: "probe" }], details: {} };
+    },
+  });
+  pi.on("session_start", () => { started = true; });
+  pi.on("session_shutdown", () => { writeFileSync(${JSON.stringify(shutdownMarker)}, "shutdown"); });
+}
+`,
+  );
+  await writeFile(
+    join(extension.agentDir, "settings.json"),
+    JSON.stringify({ extensions: [childExtensionPath], skills: [skillDir] }),
+  );
+
+  await extension.execute({ display_name: "real-child", prompt: "Report resource state." });
+  await waitFor(() => extension.sent.length === 1);
+
+  assert.equal(extension.sent[0].message.customType, "subagent-completed");
+  assert.match(extension.sent[0].message.content, /\{"started":true,"skill":true,"tool":true\}/);
+  assert.equal(await readFile(shutdownMarker, "utf8"), "shutdown");
+  const resultPath = extension.sent[0].message.details.result_path;
+  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
+  assert.match(await readFile(resultPath, "utf8"), /\{"started":true,"skill":true,"tool":true\}/);
 });

@@ -64,14 +64,13 @@ interface ChildSessionOptions {
   excludeTools: string[];
 }
 
-export type CreateChildSession = (options: ChildSessionOptions) => Promise<ChildSession>;
+type CreateChildSession = (options: ChildSessionOptions) => Promise<ChildSession>;
 
 interface ChildRecord {
   id: string;
   displayName: string;
   prompt: string;
   profile: ModelProfile;
-  state: "starting" | "running";
 }
 
 interface SubagentsExtensionOptions {
@@ -91,10 +90,6 @@ async function createPiChildSession(options: ChildSessionOptions): Promise<Child
     noThemes: true,
     systemPrompt: options.systemPrompt,
     appendSystemPrompt: [],
-    skillsOverride: ({ skills, diagnostics }) => ({
-      diagnostics,
-      skills: skills.map((skill) => ({ ...skill, disableModelInvocation: true })),
-    }),
   });
   await resourceLoader.reload();
 
@@ -194,6 +189,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 async function readConfig(agentDir: string, ctx: ExtensionContext): Promise<SubagentsConfig> {
   let source: string;
   try {
@@ -202,14 +201,14 @@ async function readConfig(agentDir: string, ctx: ExtensionContext): Promise<Suba
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
       return { maxConcurrent: DEFAULT_MAX_CONCURRENT, profiles: {} };
     }
-    throw new Error(`Cannot read ${CONFIG_FILE}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Cannot read ${CONFIG_FILE}: ${errorMessage(error)}`);
   }
 
   let raw: unknown;
   try {
     raw = JSON.parse(source);
   } catch (error) {
-    throw new Error(`Cannot parse ${CONFIG_FILE}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new Error(`Cannot parse ${CONFIG_FILE}: ${errorMessage(error)}`);
   }
   if (!isRecord(raw)) throw new Error(`${CONFIG_FILE} must contain a JSON object.`);
 
@@ -255,7 +254,7 @@ function resolveProfile(
   config: SubagentsConfig,
   ctx: ExtensionContext,
   inheritedThinkingLevel: ThinkingLevel,
- ): { model: Model; thinkingLevel: ThinkingLevel } {
+): { model: Model; thinkingLevel: ThinkingLevel } {
   if (profile === "inherit") {
     if (!ctx.model) throw new Error("Cannot launch a subagent without an active parent model.");
     return { model: ctx.model, thinkingLevel: inheritedThinkingLevel };
@@ -291,7 +290,6 @@ export function createSubagentsExtension({
       let disposeAttempted = false;
       try {
         if (children.get(record.id) !== record) return;
-        record.state = "running";
         const missingTools = options.tools.filter((name) => !child.getActiveToolNames().includes(name));
         if (missingTools.length > 0) {
           throw new Error(`Child could not load active tools: ${missingTools.join(", ")}`);
@@ -368,7 +366,6 @@ export function createSubagentsExtension({
           displayName: display_name,
           prompt,
           profile: model_profile,
-          state: "starting",
         };
         children.set(record.id, record);
         updateStatus(ctx);
@@ -389,7 +386,7 @@ export function createSubagentsExtension({
           pi.sendMessage(
             {
               customType: "subagent-failed",
-              content: `Subagent ${record.displayName} (${record.id}) failed to start: ${error instanceof Error ? error.message : String(error)}`,
+              content: `Subagent ${record.displayName} (${record.id}) failed to start: ${errorMessage(error)}`,
               display: true,
               details: { id: record.id, display_name: record.displayName },
             },
