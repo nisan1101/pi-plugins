@@ -40,7 +40,7 @@ function callTool(tool, params, context = {}) {
   return tool.execute("call", params, undefined, undefined, context);
 }
 
-function assertCalledExactly(actual, expected) {
+function assertCallsInAnyOrder(actual, expected) {
   assert.deepEqual([...actual].sort(), [...expected].sort());
 }
 
@@ -412,7 +412,7 @@ test("kill aborts a waiting child and returns its private partial result", async
   const killed = await extension.kill({ id: launch.details.id });
   await questionRejected;
 
-  assertCalledExactly(lifecycle, ["abort", "shutdown", "dispose"]);
+  assertCallsInAnyOrder(lifecycle, ["abort", "shutdown", "dispose"]);
   assert.equal(killed.details.id, launch.details.id);
   assert.equal(killed.details.display_name, "cancelled");
   assert.match(killed.content[0].text, /cooperative/i);
@@ -463,7 +463,7 @@ test("kill wins a simultaneous natural failure without duplicate cleanup or noti
   const killed = await extension.kill({ id: launch.details.id });
   await Promise.resolve();
 
-  assertCalledExactly(lifecycle, ["abort", "shutdown", "dispose"]);
+  assertCallsInAnyOrder(lifecycle, ["abort", "shutdown", "dispose"]);
   assert.equal(extension.sent.length, 0);
   const resultPath = killed.details.result_path;
   t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
@@ -501,7 +501,7 @@ test("kill claims a starting child and late startup is cleaned silently", async 
 
   startup.resolve(child);
   await waitFor(() => lifecycle.includes("dispose"));
-  assertCalledExactly(lifecycle, ["abort", "shutdown", "dispose"]);
+  assertCallsInAnyOrder(lifecycle, ["abort", "shutdown", "dispose"]);
   assert.equal(extension.sent.length, 0);
 });
 
@@ -643,7 +643,7 @@ test("natural completion writes a private result, disposes the child, and wakes 
   const launch = await extension.execute({ display_name: "finisher", prompt: "Return the exact finding." });
   await waitFor(() => extension.sent.length === 1);
 
-  assertCalledExactly(lifecycle, ["shutdown", "dispose"]);
+  assertCallsInAnyOrder(lifecycle, ["shutdown", "dispose"]);
   assert.equal(extension.sent.length, 1);
   const [{ message, options }] = extension.sent;
   assert.equal(message.customType, "subagent-completed");
@@ -739,7 +739,7 @@ test("natural failure writes focused error metadata and wakes the parent once", 
   const launch = await extension.execute({ display_name: "failing", prompt: "Try the provider." });
   await waitFor(() => extension.sent.length === 1);
 
-  assertCalledExactly(lifecycle, ["shutdown", "dispose"]);
+  assertCallsInAnyOrder(lifecycle, ["shutdown", "dispose"]);
   assert.equal(extension.sent.length, 1);
   const [{ message, options }] = extension.sent;
   assert.equal(message.customType, "subagent-failed");
@@ -864,7 +864,7 @@ test("startup failure disposes a child that cannot rediscover every active work 
   await waitFor(() => extension.sent.length === 1);
 
   assert.equal(prompted, false);
-  assertCalledExactly(lifecycle, ["shutdown", "dispose"]);
+  assertCallsInAnyOrder(lifecycle, ["shutdown", "dispose"]);
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
   assert.equal(extension.sent[0].message.customType, "subagent-failed");
   assert.match(extension.sent[0].message.content, /missing-tool/);
@@ -978,10 +978,10 @@ test("session shutdown silently cancels active, waiting, starting, and finalizin
   await extension.emit("agent_settled");
   await extension.emit("session_shutdown", { reason: "quit" });
 
-  assertCalledExactly(lifecycle[0], ["abort", "shutdown", "dispose"]);
-  assertCalledExactly(lifecycle[1], ["abort", "shutdown", "dispose"]);
-  assertCalledExactly(lifecycle[2], ["shutdown", "dispose"]);
-  assertCalledExactly(lifecycle[3], ["abort", "shutdown", "dispose"]);
+  assertCallsInAnyOrder(lifecycle[0], ["abort", "shutdown", "dispose"]);
+  assertCallsInAnyOrder(lifecycle[1], ["abort", "shutdown", "dispose"]);
+  assertCallsInAnyOrder(lifecycle[2], ["shutdown", "dispose"]);
+  assertCallsInAnyOrder(lifecycle[3], ["abort", "shutdown", "dispose"]);
   assert.equal(extension.sent.length, 0);
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
 });
