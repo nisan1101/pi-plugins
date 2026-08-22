@@ -6,10 +6,12 @@ import { join } from "node:path";
 import { getSupportedThinkingLevels, StringEnum } from "@earendil-works/pi-ai";
 import {
   createAgentSession,
+  defineTool,
   DefaultResourceLoader,
   getAgentDir,
   SessionManager,
   SettingsManager,
+  type AgentToolResult,
   type CreateAgentSessionOptions,
   type ExtensionAPI,
   type ExtensionContext,
@@ -19,9 +21,11 @@ import { Type } from "typebox";
 const CONFIG_FILE = "subagents.json";
 const DEFAULT_MAX_CONCURRENT = 4;
 const ORCHESTRATION_TOOLS = ["subagent", "message_subagent", "kill_subagent"];
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PROFILE_NAMES = ["inherit", "low", "medium", "high", "xhigh"] as const;
 
 type Model = NonNullable<CreateAgentSessionOptions["model"]>;
+type ChildTool = NonNullable<CreateAgentSessionOptions["customTools"]>[number];
 type ThinkingLevel = NonNullable<CreateAgentSessionOptions["thinkingLevel"]>;
 type ModelProfile = (typeof PROFILE_NAMES)[number];
 type NamedModelProfile = Exclude<ModelProfile, "inherit">;
@@ -46,6 +50,7 @@ interface ChildMessage {
 }
 
 interface ChildSession {
+  steer(text: string): Promise<void>;
   prompt(text: string): Promise<void>;
   readonly messages: readonly ChildMessage[];
   getActiveToolNames(): string[];
@@ -61,6 +66,7 @@ interface ChildSessionOptions {
   thinkingLevel: ThinkingLevel;
   systemPrompt: string;
   tools: string[];
+  messageParentTool: ChildTool;
   excludeTools: string[];
 }
 
@@ -71,6 +77,16 @@ interface ChildRecord {
   displayName: string;
   prompt: string;
   profile: ModelProfile;
+  state: "starting" | "running" | "waiting" | "finalizing";
+  child?: ChildSession;
+  startupGuidance: string[];
+  pendingQuestion?: { resolve(answer: string): void };
+}
+
+interface MessageParentDetails {
+  id: string;
+  display_name: string;
+  answer?: string;
 }
 
 interface SubagentsExtensionOptions {
@@ -98,7 +114,8 @@ async function createPiChildSession(options: ChildSessionOptions): Promise<Child
     agentDir: options.agentDir,
     model: options.model,
     thinkingLevel: options.thinkingLevel,
-    tools: options.tools,
+    tools: [...options.tools, "message_parent"],
+    customTools: [options.messageParentTool],
     excludeTools: options.excludeTools,
     resourceLoader,
     settingsManager,
@@ -107,6 +124,7 @@ async function createPiChildSession(options: ChildSessionOptions): Promise<Child
   await session.bindExtensions({ mode: "print" });
 
   return {
+    steer: (text) => session.steer(text),
     prompt: (text) => session.prompt(text),
     get messages() {
       return session.messages;
@@ -118,7 +136,7 @@ async function createPiChildSession(options: ChildSessionOptions): Promise<Child
 }
 
 function childRolePrompt(parentPrompt: string): string {
-  return `${parentPrompt}\n\n# Fresh subagent role\n\nYou are a fresh subagent, not the parent agent. You have no parent conversation history. The parent remains authoritative and has delegated one narrow task to you.\n\nYou share the parent's working directory with concurrent work. Inspect current file contents before editing. Modify files only when the delegated task explicitly asks for implementation. Never revert unrelated changes. If current work conflicts with the delegated task, stop and report the conflict instead of forcing a resolution.`;
+  return `${parentPrompt}\n\n# Fresh subagent role\n\nYou are a fresh subagent, not the parent agent. You have no parent conversation history. The parent remains authoritative and has delegated one narrow task to you.\n\nYou share the parent's working directory with concurrent work. Inspect current file contents before editing. Modify files only when the delegated task explicitly asks for implementation. Never revert unrelated changes. If current work conflicts with the delegated task, stop and report the conflict instead of forcing a resolution.\n\nUse message_parent with kind progress only for meaningful milestones, not routine tool activity. Use kind question when you must block for parent guidance.`;
 }
 
 function delegatedTask(record: ChildRecord): string {
@@ -178,7 +196,9 @@ function preview(result: string): string {
 }
 
 function renderStatus(records: Iterable<ChildRecord>): string | undefined {
-  const handles = [...records].map(({ displayName, id }) => `${displayName}#${id.slice(0, 8)}`);
+  const handles = [...records]
+    .filter(({ state }) => state !== "finalizing")
+    .map(({ displayName, id, state }) => `${displayName}#${id.slice(0, 8)}${state === "waiting" ? "?" : ""}`);
   if (handles.length === 0) return undefined;
   const visible = handles.slice(0, 3);
   if (handles.length > 3) visible.push(`+${handles.length - 3}`);
@@ -284,19 +304,81 @@ export function createSubagentsExtension({
       if (ctx.mode === "tui") ctx.ui.setStatus("subagents", renderStatus(children.values()));
     };
 
+    const createMessageParentTool = (record: ChildRecord, ctx: ExtensionContext) =>
+      defineTool({
+        name: "message_parent",
+        label: "Message Parent",
+        description: "Report meaningful progress or ask the parent a blocking question.",
+        parameters: Type.Object({
+          kind: StringEnum(["progress", "question"] as const),
+          message: Type.String({ minLength: 1 }),
+        }),
+        async execute(_toolCallId, { kind, message }): Promise<AgentToolResult<MessageParentDetails>> {
+          if (!message.trim()) throw new Error("message must not be empty.");
+          if (children.get(record.id) !== record || record.state === "finalizing") {
+            throw new Error("The parent session is no longer available.");
+          }
+          const details: MessageParentDetails = { id: record.id, display_name: record.displayName };
+          if (kind === "question") {
+            if (record.pendingQuestion) throw new Error("Subagent is already waiting for a parent answer.");
+            const answer = new Promise<string>((resolve) => {
+              record.pendingQuestion = { resolve };
+            });
+            record.state = "waiting";
+            updateStatus(ctx);
+            pi.sendMessage(
+              {
+                customType: "subagent-question",
+                content: `Subagent ${record.displayName} (${record.id}) asks:\n\n${message}`,
+                display: true,
+                details,
+              },
+              { deliverAs: "followUp", triggerTurn: true },
+            );
+            const response = await answer;
+            return {
+              content: [{ type: "text" as const, text: `Parent answered: ${response}` }],
+              details: { ...details, answer: response },
+            };
+          }
+          pi.sendMessage(
+            {
+              customType: "subagent-progress",
+              content: `Subagent ${record.displayName} (${record.id}) progress:\n\n${message}`,
+              display: true,
+              details,
+            },
+            { deliverAs: "followUp", triggerTurn: false },
+          );
+          return {
+            content: [{ type: "text" as const, text: "Progress reported to parent." }],
+            details,
+          };
+        },
+      });
+
     const runChild = async (record: ChildRecord, ctx: ExtensionContext, options: ChildSessionOptions) => {
       const child = await createChildSession(options);
       let shutdownAttempted = false;
       let disposeAttempted = false;
       try {
         if (children.get(record.id) !== record) return;
-        const missingTools = options.tools.filter((name) => !child.getActiveToolNames().includes(name));
+        const expectedTools = [...options.tools, "message_parent"];
+        const missingTools = expectedTools.filter((name) => !child.getActiveToolNames().includes(name));
         if (missingTools.length > 0) {
           throw new Error(`Child could not load active tools: ${missingTools.join(", ")}`);
         }
-        await child.prompt(delegatedTask(record));
+        record.child = child;
+        const prompt = child.prompt(delegatedTask(record));
+        const startupSteering = record.startupGuidance.map((message) => child.steer(message));
+        record.startupGuidance.length = 0;
+        if (record.state === "starting") record.state = "running";
+        await Promise.all(startupSteering);
+        await prompt;
         if (children.get(record.id) !== record) return;
 
+        record.state = "finalizing";
+        updateStatus(ctx);
         const result = terminalText(child.messages);
         const resultPath = await writeResult(record, options, result);
         shutdownAttempted = true;
@@ -318,6 +400,10 @@ export function createSubagentsExtension({
           { deliverAs: "followUp", triggerTurn: true },
         );
       } catch (error) {
+        if (children.get(record.id) === record) {
+          record.state = "finalizing";
+          updateStatus(ctx);
+        }
         if (!shutdownAttempted) {
           try {
             await child.shutdown();
@@ -331,6 +417,47 @@ export function createSubagentsExtension({
         throw error;
       }
     };
+
+    pi.registerTool({
+      name: "message_subagent",
+      label: "Message Subagent",
+      description: "Send guidance to one active subagent using its full UUID.",
+      parameters: Type.Object({
+        id: Type.String(),
+        message: Type.String({ minLength: 1 }),
+      }),
+      async execute(_toolCallId, { id, message }, _signal, _onUpdate, ctx) {
+        if (!UUID_PATTERN.test(id)) throw new Error("id must be a full subagent UUID.");
+        if (!message.trim()) throw new Error("message must not be empty.");
+        const record = children.get(id);
+        if (!record || record.state === "finalizing") {
+          throw new Error(`No active subagent with UUID ${id}.`);
+        }
+        if (record.pendingQuestion) {
+          const { resolve } = record.pendingQuestion;
+          record.pendingQuestion = undefined;
+          record.state = "running";
+          updateStatus(ctx);
+          resolve(message);
+          return {
+            content: [{ type: "text" as const, text: `Answered ${record.displayName} (${id}).` }],
+            details: { id, display_name: record.displayName },
+          };
+        }
+        if (record.state === "starting") {
+          record.startupGuidance.push(message);
+          return {
+            content: [{ type: "text" as const, text: `Buffered guidance for ${record.displayName} (${id}).` }],
+            details: { id, display_name: record.displayName },
+          };
+        }
+        await record.child!.steer(message);
+        return {
+          content: [{ type: "text" as const, text: `Steered ${record.displayName} (${id}).` }],
+          details: { id, display_name: record.displayName },
+        };
+      },
+    });
 
     pi.registerTool({
       name: "subagent",
@@ -348,7 +475,7 @@ export function createSubagentsExtension({
 
         const agentDir = getAgentDir();
         const config = await readConfig(agentDir, ctx);
-        if (children.size >= config.maxConcurrent) {
+        if ([...children.values()].filter(({ state }) => state !== "finalizing").length >= config.maxConcurrent) {
           throw new Error(
             `Subagent limit ${config.maxConcurrent} reached: ${renderStatus(children.values()) ?? "no active handles"}.`,
           );
@@ -366,6 +493,8 @@ export function createSubagentsExtension({
           displayName: display_name,
           prompt,
           profile: model_profile,
+          state: "starting",
+          startupGuidance: [],
         };
         children.set(record.id, record);
         updateStatus(ctx);
@@ -379,6 +508,7 @@ export function createSubagentsExtension({
           thinkingLevel: resolvedProfile.thinkingLevel,
           systemPrompt: childRolePrompt(ctx.getSystemPrompt()),
           tools,
+          messageParentTool: createMessageParentTool(record, ctx),
           excludeTools: ORCHESTRATION_TOOLS,
         }).catch((error) => {
           children.delete(record.id);
