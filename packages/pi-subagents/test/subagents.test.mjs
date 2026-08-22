@@ -157,12 +157,15 @@ test("parent messages buffer during startup and steer only the addressed running
   const startups = [deferred(), deferred()];
   const runs = [deferred(), deferred()];
   const steered = [[], []];
+  const timelines = [[], []];
   const children = steered.map((messages, index) =>
     fakeChild({
       async steer(message) {
+        timelines[index].push(`steer:${message}`);
         messages.push(message);
       },
       async prompt() {
+        timelines[index].push("prompt");
         await runs[index].promise;
       },
     }),
@@ -184,6 +187,10 @@ test("parent messages buffer during startup and steer only the addressed running
   assert.deepEqual(steered, [
     ["Use the public API.", "Preserve startup order."],
     ["Only for the second child."],
+  ]);
+  assert.deepEqual(timelines, [
+    ["prompt", "steer:Use the public API.", "steer:Preserve startup order."],
+    ["prompt", "steer:Only for the second child."],
   ]);
 
   const delivered = await extension.message({ id: first.details.id, message: "Also inspect callers." });
@@ -275,6 +282,7 @@ test("parent answer resolves one waiting question and later messages resume stee
   await extension.message({ id: launch.details.id, message: "Queued before the question." });
   await callTool(creation.messageParentTool, { kind: "progress", message: "Progress before question." });
 
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   let questionSettled = false;
   const question = callTool(creation.messageParentTool, {
     kind: "question",
@@ -285,8 +293,9 @@ test("parent answer resolves one waiting question and later messages resume stee
   assert.equal(extension.sent.length, 0);
   extension.setIdle(true);
   await extension.emit("agent_settled");
-  await waitFor(() => extension.sent.length === 2);
-  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(extension.sent.length, 2);
+  t.mock.timers.tick(2_147_483_647);
+  await Promise.resolve();
 
   assert.equal(questionSettled, false);
   assert.match(extension.statuses.at(-1).text, /asker#[0-9a-f]{8}\?$/i);

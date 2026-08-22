@@ -72,15 +72,18 @@ interface ChildSessionOptions {
 
 type CreateChildSession = (options: ChildSessionOptions) => Promise<ChildSession>;
 
+type ChildState =
+  | { phase: "starting"; guidance: string[] }
+  | { phase: "running"; child: ChildSession }
+  | { phase: "waiting"; child: ChildSession; resolve(answer: string): void }
+  | { phase: "finalizing"; child: ChildSession };
+
 interface ChildRecord {
   id: string;
   displayName: string;
   prompt: string;
   profile: ModelProfile;
-  state: "starting" | "running" | "waiting" | "finalizing";
-  child?: ChildSession;
-  startupGuidance: string[];
-  pendingQuestion?: { resolve(answer: string): void };
+  state: ChildState;
 }
 
 interface MessageParentDetails {
@@ -196,13 +199,15 @@ function preview(result: string): string {
 }
 
 function isActive(record: ChildRecord): boolean {
-  return record.state !== "finalizing";
+  return record.state.phase !== "finalizing";
 }
 
 function renderStatus(records: Iterable<ChildRecord>): string | undefined {
   const handles = [...records]
     .filter(isActive)
-    .map(({ displayName, id, state }) => `${displayName}#${id.slice(0, 8)}${state === "waiting" ? "?" : ""}`);
+    .map(
+      ({ displayName, id, state }) => `${displayName}#${id.slice(0, 8)}${state.phase === "waiting" ? "?" : ""}`,
+    );
   if (handles.length === 0) return undefined;
   const visible = handles.slice(0, 3);
   if (handles.length > 3) visible.push(`+${handles.length - 3}`);
@@ -336,16 +341,16 @@ export function createSubagentsExtension({
         }),
         async execute(_toolCallId, { kind, message }): Promise<AgentToolResult<MessageParentDetails>> {
           if (!message.trim()) throw new Error("message must not be empty.");
-          if (children.get(record.id) !== record || record.state === "finalizing") {
+          const state = record.state;
+          if (children.get(record.id) !== record || state.phase === "starting" || state.phase === "finalizing") {
             throw new Error("The parent session is no longer available.");
           }
           const details: MessageParentDetails = { id: record.id, display_name: record.displayName };
           if (kind === "question") {
-            if (record.pendingQuestion) throw new Error("Subagent is already waiting for a parent answer.");
+            if (state.phase === "waiting") throw new Error("Subagent is already waiting for a parent answer.");
             const answer = new Promise<string>((resolve) => {
-              record.pendingQuestion = { resolve };
+              record.state = { phase: "waiting", child: state.child, resolve };
             });
-            record.state = "waiting";
             updateStatus(ctx);
             deliverParentMessage(ctx, true, () =>
               pi.sendMessage(
@@ -393,16 +398,16 @@ export function createSubagentsExtension({
         if (missingTools.length > 0) {
           throw new Error(`Child could not load active tools: ${missingTools.join(", ")}`);
         }
-        record.child = child;
+        const startup = record.state;
+        if (startup.phase !== "starting") return;
         const prompt = child.prompt(delegatedTask(record));
-        const startupSteering = record.startupGuidance.map((message) => child.steer(message));
-        record.startupGuidance.length = 0;
-        if (record.state === "starting") record.state = "running";
+        const startupSteering = startup.guidance.map((message) => child.steer(message));
+        record.state = { phase: "running", child };
         await Promise.all(startupSteering);
         await prompt;
         if (children.get(record.id) !== record) return;
 
-        record.state = "finalizing";
+        record.state = { phase: "finalizing", child };
         updateStatus(ctx);
         const result = terminalText(child.messages);
         const resultPath = await writeResult(record, options, result);
@@ -427,7 +432,7 @@ export function createSubagentsExtension({
         );
       } catch (error) {
         if (children.get(record.id) === record) {
-          record.state = "finalizing";
+          record.state = { phase: "finalizing", child };
           updateStatus(ctx);
         }
         if (!shutdownAttempted) {
@@ -456,28 +461,27 @@ export function createSubagentsExtension({
         if (!UUID_PATTERN.test(id)) throw new Error("id must be a full subagent UUID.");
         if (!message.trim()) throw new Error("message must not be empty.");
         const record = children.get(id);
-        if (!record || record.state === "finalizing") {
+        if (!record || record.state.phase === "finalizing") {
           throw new Error(`No active subagent with UUID ${id}.`);
         }
-        if (record.pendingQuestion) {
-          const { resolve } = record.pendingQuestion;
-          record.pendingQuestion = undefined;
-          record.state = "running";
+        const state = record.state;
+        if (state.phase === "waiting") {
+          record.state = { phase: "running", child: state.child };
           updateStatus(ctx);
-          resolve(message);
+          state.resolve(message);
           return {
             content: [{ type: "text" as const, text: `Answered ${record.displayName} (${id}).` }],
             details: { id, display_name: record.displayName },
           };
         }
-        if (record.state === "starting") {
-          record.startupGuidance.push(message);
+        if (state.phase === "starting") {
+          state.guidance.push(message);
           return {
             content: [{ type: "text" as const, text: `Buffered guidance for ${record.displayName} (${id}).` }],
             details: { id, display_name: record.displayName },
           };
         }
-        await record.child!.steer(message);
+        await state.child.steer(message);
         return {
           content: [{ type: "text" as const, text: `Steered ${record.displayName} (${id}).` }],
           details: { id, display_name: record.displayName },
@@ -519,8 +523,7 @@ export function createSubagentsExtension({
           displayName: display_name,
           prompt,
           profile: model_profile,
-          state: "starting",
-          startupGuidance: [],
+          state: { phase: "starting", guidance: [] },
         };
         children.set(record.id, record);
         updateStatus(ctx);
