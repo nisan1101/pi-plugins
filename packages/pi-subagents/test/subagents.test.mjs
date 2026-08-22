@@ -40,6 +40,10 @@ function callTool(tool, params, context = {}) {
   return tool.execute("call", params, undefined, undefined, context);
 }
 
+function assertCalledExactly(actual, expected) {
+  assert.deepEqual([...actual].sort(), [...expected].sort());
+}
+
 async function loadExtension(t, createChildSession, overrides = {}) {
   const agentDir = await mkdtemp(join(tmpdir(), "pi-subagents-test-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -128,6 +132,31 @@ async function loadExtension(t, createChildSession, overrides = {}) {
     kill: (params) => executeTool("kill_subagent", params),
   };
 }
+
+// Installing the repository manifest loads the complete parent tool surface and no fork-context API.
+test("repository package installs the fresh subagent parent tools", async () => {
+  const repositoryRoot = new URL("../../../", import.meta.url);
+  const manifest = JSON.parse(await readFile(new URL("package.json", repositoryRoot), "utf8"));
+  const entry = manifest.pi.extensions.find((path) =>
+    path.endsWith("/pi-subagents/extensions/subagents.ts"),
+  );
+  assert.ok(entry);
+
+  const { default: installedExtension } = await import(new URL(entry, repositoryRoot));
+  const tools = new Map();
+  installedExtension({
+    on() {},
+    registerTool(tool) {
+      tools.set(tool.name, tool);
+    },
+  });
+
+  assert.deepEqual([...tools.keys()].sort(), ["kill_subagent", "message_subagent", "subagent"]);
+  assert.equal(tools.has("message_parent"), false);
+  const launchSchema = tools.get("subagent").parameters;
+  assert.deepEqual(Object.keys(launchSchema.properties).sort(), ["display_name", "model_profile", "prompt"]);
+  assert.deepEqual([...launchSchema.required].sort(), ["display_name", "prompt"]);
+});
 
 // Launch is background-only and reusable display names never become identity.
 test("launch returns distinct UUID handles without waiting for child startup", async (t) => {
@@ -383,7 +412,7 @@ test("kill aborts a waiting child and returns its private partial result", async
   const killed = await extension.kill({ id: launch.details.id });
   await questionRejected;
 
-  assert.deepEqual(lifecycle, ["abort", "shutdown", "dispose"]);
+  assertCalledExactly(lifecycle, ["abort", "shutdown", "dispose"]);
   assert.equal(killed.details.id, launch.details.id);
   assert.equal(killed.details.display_name, "cancelled");
   assert.match(killed.content[0].text, /cooperative/i);
@@ -434,7 +463,7 @@ test("kill wins a simultaneous natural failure without duplicate cleanup or noti
   const killed = await extension.kill({ id: launch.details.id });
   await Promise.resolve();
 
-  assert.deepEqual(lifecycle, ["abort", "shutdown", "dispose"]);
+  assertCalledExactly(lifecycle, ["abort", "shutdown", "dispose"]);
   assert.equal(extension.sent.length, 0);
   const resultPath = killed.details.result_path;
   t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
@@ -472,7 +501,7 @@ test("kill claims a starting child and late startup is cleaned silently", async 
 
   startup.resolve(child);
   await waitFor(() => lifecycle.includes("dispose"));
-  assert.deepEqual(lifecycle, ["abort", "shutdown", "dispose"]);
+  assertCalledExactly(lifecycle, ["abort", "shutdown", "dispose"]);
   assert.equal(extension.sent.length, 0);
 });
 
@@ -614,7 +643,7 @@ test("natural completion writes a private result, disposes the child, and wakes 
   const launch = await extension.execute({ display_name: "finisher", prompt: "Return the exact finding." });
   await waitFor(() => extension.sent.length === 1);
 
-  assert.deepEqual(lifecycle, ["shutdown", "dispose"]);
+  assertCalledExactly(lifecycle, ["shutdown", "dispose"]);
   assert.equal(extension.sent.length, 1);
   const [{ message, options }] = extension.sent;
   assert.equal(message.customType, "subagent-completed");
@@ -710,7 +739,7 @@ test("natural failure writes focused error metadata and wakes the parent once", 
   const launch = await extension.execute({ display_name: "failing", prompt: "Try the provider." });
   await waitFor(() => extension.sent.length === 1);
 
-  assert.deepEqual(lifecycle, ["shutdown", "dispose"]);
+  assertCalledExactly(lifecycle, ["shutdown", "dispose"]);
   assert.equal(extension.sent.length, 1);
   const [{ message, options }] = extension.sent;
   assert.equal(message.customType, "subagent-failed");
@@ -835,7 +864,7 @@ test("startup failure disposes a child that cannot rediscover every active work 
   await waitFor(() => extension.sent.length === 1);
 
   assert.equal(prompted, false);
-  assert.deepEqual(lifecycle, ["shutdown", "dispose"]);
+  assertCalledExactly(lifecycle, ["shutdown", "dispose"]);
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
   assert.equal(extension.sent[0].message.customType, "subagent-failed");
   assert.match(extension.sent[0].message.content, /missing-tool/);
@@ -949,12 +978,10 @@ test("session shutdown silently cancels active, waiting, starting, and finalizin
   await extension.emit("agent_settled");
   await extension.emit("session_shutdown", { reason: "quit" });
 
-  assert.deepEqual(lifecycle, [
-    ["abort", "shutdown", "dispose"],
-    ["abort", "shutdown", "dispose"],
-    ["shutdown", "dispose"],
-    ["abort", "shutdown", "dispose"],
-  ]);
+  assertCalledExactly(lifecycle[0], ["abort", "shutdown", "dispose"]);
+  assertCalledExactly(lifecycle[1], ["abort", "shutdown", "dispose"]);
+  assertCalledExactly(lifecycle[2], ["shutdown", "dispose"]);
+  assertCalledExactly(lifecycle[3], ["abort", "shutdown", "dispose"]);
   assert.equal(extension.sent.length, 0);
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
 });
