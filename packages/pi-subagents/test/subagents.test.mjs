@@ -82,7 +82,7 @@ async function loadExtension(t, createChildSession, overrides = {}) {
 
   const subagent = tools.get("subagent");
   assert.ok(subagent);
-  const model = overrides.model ?? { provider: "test", id: "parent-model" };
+  const model = "model" in overrides ? overrides.model : { provider: "test", id: "parent-model" };
   const context = {
     cwd: overrides.cwd ?? "/workspace",
     mode: overrides.mode ?? "tui",
@@ -606,35 +606,52 @@ test("configured model profiles select their model and thinking level", async (t
   );
 });
 
-// A missing named profile falls back visibly to the model and thinking level that actually run.
-test("unconfigured model profile visibly falls back to inherited model", async (t) => {
-  const creations = [];
-  const child = fakeChild({
-    messages: [{ role: "assistant", content: [{ type: "text", text: "Inherited result." }] }],
-  });
-  const extension = await loadExtension(t, async (options) => {
-    creations.push(options);
-    return child;
-  });
+// Every missing named profile falls back visibly across parent execution modes.
+test("unconfigured model profiles visibly fall back to inherited model", async (t) => {
+  const scenarios = [
+    { profile: "low", mode: "tui" },
+    { profile: "medium", mode: "print", config: {} },
+    { profile: "high", mode: "json", config: { maxConcurrent: 4 } },
+    { profile: "xhigh", mode: "rpc", config: { profiles: {} } },
+  ];
 
-  const launch = await extension.execute({
-    display_name: "fallback",
-    prompt: "Use the available profile.",
-    model_profile: "low",
-  });
+  for (const { profile, mode, config } of scenarios) {
+    const creations = [];
+    const child = fakeChild({
+      messages: [{ role: "assistant", content: [{ type: "text", text: "Inherited result." }] }],
+    });
+    const extension = await loadExtension(
+      t,
+      async (options) => {
+        creations.push(options);
+        return child;
+      },
+      { mode },
+    );
+    if (config) await writeFile(join(extension.agentDir, "subagents.json"), JSON.stringify(config));
 
-  assert.match(launch.content[0].text, /profile low is not configured; using inherit/i);
-  assert.equal(extension.warnings.length, 0);
-  assert.equal(creations[0].model.id, "parent-model");
-  assert.equal(creations[0].thinkingLevel, "high");
+    const launch = await extension.execute({
+      display_name: "fallback",
+      prompt: "Use the available profile.",
+      model_profile: profile,
+    });
 
-  await waitFor(() => extension.sent.length === 1);
-  const resultPath = extension.sent[0].message.details.result_path;
-  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
-  const result = await readFile(resultPath, "utf8");
-  assert.match(result, /Model profile: inherit/);
-  assert.match(result, /Model: test\/parent-model/);
-  assert.match(result, /Thinking level: high/);
+    assert.match(
+      launch.content[0].text,
+      new RegExp(`profile ${profile} is not configured; using inherit`, "i"),
+    );
+    assert.equal(extension.warnings.length, 0);
+    assert.equal(creations[0].model.id, "parent-model");
+    assert.equal(creations[0].thinkingLevel, "high");
+
+    await waitFor(() => extension.sent.length === 1);
+    const resultPath = extension.sent[0].message.details.result_path;
+    t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
+    const result = await readFile(resultPath, "utf8");
+    assert.match(result, /Model profile: inherit/);
+    assert.match(result, /Model: test\/parent-model/);
+    assert.match(result, /Thinking level: high/);
+  }
 });
 
 async function waitFor(predicate) {
@@ -1147,10 +1164,26 @@ test("global concurrency configuration bounds active launches", async (t) => {
 test("invalid and unavailable profiles leave no active child", async (t) => {
   const cases = [
     { source: "{", error: /Cannot parse subagents\.json/ },
+    { source: JSON.stringify({ profiles: null }), error: /profiles must be an object/i },
+    {
+      source: JSON.stringify({
+        profiles: { turbo: { provider: "test", model: "model", thinkingLevel: "high" } },
+      }),
+      error: /unsupported model profile turbo/i,
+    },
+    { source: JSON.stringify({}), noParent: true, error: /without an active parent model/i },
     {
       source: JSON.stringify({
         profiles: { low: { provider: "missing", model: "model", thinkingLevel: "low" } },
       }),
+      error: /profile low is unavailable/i,
+    },
+    {
+      source: JSON.stringify({
+        profiles: { low: { provider: "test", model: "model", thinkingLevel: "low" } },
+      }),
+      model: { provider: "test", id: "model", reasoning: true },
+      auth: false,
       error: /profile low is unavailable/i,
     },
     {
@@ -1177,9 +1210,10 @@ test("invalid and unavailable profiles leave no active child", async (t) => {
         throw new Error("factory should not run");
       },
       {
+        model: scenario.noParent ? undefined : { provider: "test", id: "parent-model" },
         modelRegistry: {
           find: () => scenario.model,
-          hasConfiguredAuth: () => true,
+          hasConfiguredAuth: () => scenario.auth ?? true,
         },
       },
     );

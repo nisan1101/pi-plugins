@@ -298,7 +298,7 @@ async function readConfig(agentDir: string, ctx: ExtensionContext): Promise<Suba
     }
   }
 
-  const rawProfiles = raw.profiles ?? {};
+  const rawProfiles = raw.profiles === undefined ? {} : raw.profiles;
   if (!isRecord(rawProfiles)) throw new Error(`${CONFIG_FILE} profiles must be an object.`);
   const profiles: SubagentsConfig["profiles"] = {};
   for (const [name, value] of Object.entries(rawProfiles)) {
