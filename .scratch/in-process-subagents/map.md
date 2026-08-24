@@ -4,3 +4,4 @@
 - [02 — Communicate with active subagents](issues/02-communicate-with-active-subagents.md) — resolved
 - [03 — Finalize and cancel subagents safely](issues/03-finalize-and-cancel-subagents-safely.md) — resolved
 - [04 — Document and verify the extension](issues/04-document-and-verify-extension.md) — resolved
+- [05 — Fall back to inherited model for unconfigured profiles](issues/05-fall-back-to-inherited-model-for-unconfigured-profiles.md) — ready-for-agent

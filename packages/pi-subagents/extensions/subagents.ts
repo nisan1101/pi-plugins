@@ -331,14 +331,14 @@ function resolveProfile(
   config: SubagentsConfig,
   ctx: ExtensionContext,
   inheritedThinkingLevel: ThinkingLevel,
-): { model: Model; thinkingLevel: ThinkingLevel } {
+): { profile: ModelProfile; model: Model; thinkingLevel: ThinkingLevel } {
   if (profile === "inherit") {
     if (!ctx.model) throw new Error("Cannot launch a subagent without an active parent model.");
-    return { model: ctx.model, thinkingLevel: inheritedThinkingLevel };
+    return { profile, model: ctx.model, thinkingLevel: inheritedThinkingLevel };
   }
 
   const configured = config.profiles[profile];
-  if (!configured) throw new Error(`Model profile ${profile} is not configured.`);
+  if (!configured) return resolveProfile("inherit", config, ctx, inheritedThinkingLevel);
   const model = ctx.modelRegistry.find(configured.provider, configured.model);
   if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
     throw new Error(`Model profile ${profile} is unavailable: ${configured.provider}/${configured.model}.`);
@@ -348,7 +348,7 @@ function resolveProfile(
       `Model profile ${profile} requests unsupported thinking level ${configured.thinkingLevel}.`,
     );
   }
-  return { model, thinkingLevel: configured.thinkingLevel };
+  return { profile, model, thinkingLevel: configured.thinkingLevel };
 }
 
 export function createSubagentsExtension({
@@ -761,7 +761,7 @@ export function createSubagentsExtension({
           id: randomUUID(),
           displayName: display_name,
           prompt,
-          profile: model_profile,
+          profile: resolvedProfile.profile,
           model: resolvedProfile.model,
           thinkingLevel: resolvedProfile.thinkingLevel,
           state: { phase: "starting", guidance: [] },
@@ -783,7 +783,16 @@ export function createSubagentsExtension({
         });
 
         return {
-          content: [{ type: "text" as const, text: `Started ${record.displayName} (${record.id}).` }],
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `Started ${record.displayName} (${record.id}).` +
+                (model_profile === resolvedProfile.profile
+                  ? ""
+                  : ` Model profile ${model_profile} is not configured; using inherit.`),
+            },
+          ],
           details: { id: record.id, display_name: record.displayName },
           terminate: true,
         };

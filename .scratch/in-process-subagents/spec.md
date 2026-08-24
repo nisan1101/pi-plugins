@@ -48,7 +48,7 @@ The first version limits active subagents using a global configuration value who
 24. As a Pi user, I want to select an optional model profile at launch, so that different tasks can use an appropriate configured model and thinking level.
 25. As a Pi user, I want `inherit` to be the default model profile, so that normal delegation uses the parent model and thinking level without configuration.
 26. As a Pi user, I want `low`, `medium`, `high`, and `xhigh` profiles, so that I can configure stable capability tiers without exposing provider-specific model IDs in every call.
-27. As a Pi user, I want an invalid or unconfigured model profile rejected clearly, so that the extension never silently runs an unintended model.
+27. As a Pi user, I want an unconfigured named profile to fall back visibly to `inherit` while invalid or unavailable configurations remain errors, so that delegation continues without hiding genuine configuration problems.
 28. As a Pi user, I want model profiles stored in Pi's global agent configuration, so that they are consistent across projects in the first version.
 29. As a Pi user, I want no project-level profile override initially, so that repository-controlled files cannot unexpectedly change subagent cost or capability.
 30. As a Pi user, I want to configure the maximum number of active subagents globally, so that I can choose an appropriate resource and model-budget limit.
@@ -138,8 +138,8 @@ The first version limits active subagents using a global configuration value who
   }
   ```
 
-  Each configured profile requires non-empty `provider` and `model` strings plus a Pi thinking level. A missing file uses defaults with only `inherit` available. Invalid JSON or malformed/unsupported profile definitions reject launch. `maxConcurrent` must be a positive integer and defaults to four when omitted; an invalid value emits a warning and falls back to four.
-- Resolve `inherit` from the parent session's current model and thinking level. Reject unavailable models, unsupported profile definitions, and named profiles that are not configured rather than silently falling back.
+  Each configured profile requires non-empty `provider` and `model` strings plus a Pi thinking level. A missing file uses defaults with no named profile mappings. Invalid JSON or malformed/unsupported profile definitions reject launch. `maxConcurrent` must be a positive integer and defaults to four when omitted; an invalid value emits a warning and falls back to four.
+- Resolve `inherit` from the parent session's current model and thinking level. When a requested named profile has no mapping, resolve it as `inherit`, report the fallback in the successful tool response, and record `inherit` in the result. Continue rejecting unavailable configured models, unsupported thinking levels, malformed profile definitions, and inheritance without an active parent model.
 - Create each child as an independent in-process Pi `AgentSession` using Pi's public SDK and an in-memory child session manager.
 - Give each child a separately constructed resource loader and extension runner. Bind child extensions so they receive normal child `session_start` and `session_shutdown` lifecycle behavior.
 - Inherit the parent's effective system prompt, working directory, current model, and thinking level. Recreate capabilities through a fresh `DefaultResourceLoader` using the same global/project configuration: rediscover configured extensions and skills, use the parent's active work-tool names as the child allowlist, and fail startup visibly if an active work tool cannot be rediscovered. The child conversation itself remains fresh.
@@ -204,7 +204,7 @@ The first version limits active subagents using a global configuration value who
 - Verify that the fresh role contract identifies the child as distinct from the parent, describes the shared workspace, limits scope, and defines conflict behavior.
 - Verify that the delegated task is the first child user message and its envelope contains the full UUID, display name, and fresh-context identity.
 - Verify `inherit` model behavior and each configured model profile.
-- Verify missing, malformed, unavailable, and unsupported model profiles fail clearly without leaving an active child.
+- Verify an unconfigured named profile visibly falls back to `inherit`, while malformed, unavailable, and unsupported profile configurations fail clearly without leaving an active child.
 - Verify the active-child limit defaults to four when `maxConcurrent` is omitted.
 - Verify a valid positive `maxConcurrent` changes the accepted active-child count and that the next launch reports active display-name/short-ID handles without queueing.
 - Verify zero, negative, fractional, and otherwise invalid `maxConcurrent` values produce a warning and fall back to four.

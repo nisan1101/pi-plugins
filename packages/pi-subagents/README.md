@@ -46,8 +46,8 @@ Configuration is global at `$PI_CODING_AGENT_DIR/subagents.json`, which defaults
 
 - `maxConcurrent` limits starting, running, and waiting children. It defaults to `4`; an invalid value warns and falls back to `4`. Excess launches are rejected rather than queued.
 - `inherit` is the default profile and uses the parent's current model and thinking level.
-- Named profiles are `low`, `medium`, `high`, and `xhigh`. Each must be configured with an available provider/model and a thinking level supported by that model.
-- A missing file leaves only `inherit` available. Malformed configuration or an invalid named profile rejects the launch.
+- Named profiles are `low`, `medium`, `high`, and `xhigh`. A configured mapping requires an available provider/model and a thinking level supported by that model.
+- Requesting a named profile with no mapping—including when the file or `profiles` object is absent—falls back to `inherit` and says so in the successful launch response. Malformed configuration and configured profiles that are invalid or unavailable still reject launch.
 - Project-local profile overrides are not supported.
 
 ## Communication and results
