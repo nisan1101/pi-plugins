@@ -452,15 +452,12 @@ test("kill aborts a waiting child and returns a bare acknowledgement", async (t)
   assertCallsInAnyOrder(lifecycle, ["abort", "shutdown", "dispose"]);
   assert.equal(killed.details.id, launch.details.id);
   assert.equal(killed.details.display_name, "cancelled");
-  assert.match(killed.content[0].text, /cooperative/i);
+  assert.match(killed.content[0].text, /^Cooperatively killed cancelled \([0-9a-f-]{36}\)\.$/);
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
   assert.equal(extension.sent.length, 1);
   assert.equal(extension.sent[0].message.customType, "subagent-question");
   await assert.rejects(extension.kill({ id: launch.details.id }), /no active subagent/i);
   await assert.rejects(extension.message({ id: launch.details.id, message: "Too late." }), /no active subagent/i);
-
-  // Kill returns a bare acknowledgement: no partial text carried back.
-  assert.doesNotMatch(killed.content[0].text, /Work completed before cancellation/);
 });
 
 // A kill claimed before prompt failure remains the only terminal outcome and cleanup owner.
@@ -496,7 +493,7 @@ test("kill wins a simultaneous natural failure without duplicate cleanup or noti
 
   assertCallsInAnyOrder(lifecycle, ["abort", "shutdown", "dispose"]);
   assert.equal(extension.sent.length, 0);
-  assert.doesNotMatch(killed.content[0].text, /Partial work|aborted by parent/);
+  assert.match(killed.content[0].text, /^Cooperatively killed racer \([0-9a-f-]{36}\)\.$/);
 });
 
 // Killing during construction returns immediately and disposes the child if startup later finishes.
@@ -518,6 +515,7 @@ test("kill claims a starting child and late startup is cleaned silently", async 
   const launch = await extension.execute({ display_name: "starting", prompt: "Start slowly." });
 
   const killed = await extension.kill({ id: launch.details.id });
+  assert.match(killed.content[0].text, /^Cooperatively killed starting \([0-9a-f-]{36}\)\.$/);
   assert.deepEqual(lifecycle, []);
   assert.equal(extension.sent.length, 0);
 
@@ -742,7 +740,6 @@ test("completion inlines a long result without truncating at the old preview len
   const { message } = extension.sent[0];
   assert.equal(message.customType, "subagent-completed");
   assert.match(message.content, new RegExp(longResult));
-  assert.doesNotMatch(message.content, /…/);
 });
 
 // Terminal message events remain the source of the focused result even when the session view lags.
