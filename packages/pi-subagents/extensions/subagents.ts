@@ -250,12 +250,21 @@ function isActive(record: ChildRecord): boolean {
   return record.state.phase !== "finalizing";
 }
 
-function renderStatus(records: Iterable<ChildRecord>): string | undefined {
-  const handles = [...records]
-    .filter(isActive)
-    .map(
-      ({ displayName, id, state }) => `${displayName}#${id.slice(0, 8)}${state.phase === "waiting" ? "?" : ""}`,
-    );
+function renderStatus(
+  records: Iterable<ChildRecord>,
+  theme?: ExtensionContext["ui"]["theme"],
+): string | undefined {
+  const handles = [...records].filter(isActive).map(({ displayName, id, state }) => {
+    const handle = `${displayName}#${id.slice(0, 8)}`;
+    if (!theme) return handle;
+    const glyph =
+      state.phase === "starting"
+        ? theme.fg("dim", "◌")
+        : state.phase === "running"
+          ? theme.fg("success", "*")
+          : theme.fg("warning", "?");
+    return `${glyph} ${handle}`;
+  });
   if (handles.length === 0) return undefined;
   const visible = handles.slice(0, 3);
   if (handles.length > 3) visible.push(`+${handles.length - 3}`);
@@ -393,7 +402,7 @@ export function createSubagentsExtension({
     pi.on("agent_settled", flushParentMessages);
 
     const updateStatus = (ctx: ExtensionContext) => {
-      if (ctx.mode === "tui") ctx.ui.setStatus("subagents", renderStatus(children.values()));
+      if (ctx.mode === "tui") ctx.ui.setStatus("subagents", renderStatus(children.values(), ctx.ui.theme));
     };
 
     const closeDelivery = () => {
@@ -578,6 +587,7 @@ export function createSubagentsExtension({
         const prompt = child.prompt(delegatedTask(record));
         const startupSteering = startup.guidance.map((message) => child!.steer(message));
         record.state = { phase: "running", child };
+        updateStatus(ctx);
         await Promise.all(startupSteering);
         await prompt;
         if (children.get(record.id) !== record || !isActive(record)) return;

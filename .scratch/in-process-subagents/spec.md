@@ -16,7 +16,7 @@ Add a `pi-subagents` extension that creates independent Pi `AgentSession` childr
 
 The parent launches a subagent with a required display name and receives a generated UUID handle. Launches are always background-only and return immediately. Every later `message_subagent` and `kill_subagent` call targets the full UUID; display names are reusable presentation labels, not identifiers. Each child receives a private `message_parent` tool for non-blocking progress reports and blocking questions.
 
-The extension displays each active child's display name plus a short UUID prefix in Pi's existing footer status area. A waiting subagent is marked with `?`. Progress is delivered visibly without triggering a parent turn. Questions wake the parent and keep the child tool call blocked until the parent answers. Natural completion and failure write a private temporary `result.md`, dispose the child session, and then wake the parent exactly once with a bounded preview and result path while parent delivery remains open.
+The extension displays each active child's display name plus a short UUID prefix in Pi's existing footer status area. A static themed glyph prefixes each handle: dim `◌` while starting, success-colored `*` while running, and warning-colored `?` while waiting for the parent. Progress is delivered visibly without triggering a parent turn. Questions wake the parent and keep the child tool call blocked until the parent answers. Natural completion and failure write a private temporary `result.md`, dispose the child session, and then wake the parent exactly once with a bounded preview and result path while parent delivery remains open.
 
 The first version limits active subagents using a global configuration value whose default is four, rejects launches beyond that limit instead of queueing them, exposes no result-polling or resume tool, and provides no external Zellij or ZMX display.
 
@@ -74,7 +74,7 @@ The first version limits active subagents using a global configuration value who
 50. As a Pi user, I want at most one pending question per child, so that replies cannot be matched ambiguously.
 51. As a Pi user, I want no automatic question timeout initially, so that the extension does not invent an answer or termination policy.
 52. As a Pi user, I want to kill a child that is waiting indefinitely, so that unanswered questions do not permanently consume an active slot.
-53. As a Pi user, I want a waiting child marked with `?` beside its display name and short ID in the footer, so that blocked work is visible without a larger widget.
+53. As a Pi user, I want starting, running, and waiting children distinguished by static glyphs and semantic colors beside their display name and short ID in the footer, so that lifecycle state is visible without a larger widget.
 54. As a Pi user, I want to kill an active subagent by UUID, so that I can stop exactly the work I no longer need.
 55. As a Pi user, I want kill to abort and dispose the in-process child cooperatively, so that its resources are released through Pi lifecycle hooks.
 56. As a Pi user, I want the cooperative limitation stated clearly, so that `kill_subagent` is not mistaken for OS-level force termination.
@@ -181,7 +181,7 @@ The first version limits active subagents using a global configuration value who
 - Leave temporary result files for operating-system cleanup. Do not retain a child session solely to preserve its result.
 - Finalize natural completion and failure exactly once. Make the result durable, run child extension shutdown, dispose the child session, delete the registry record, and release strong references before emitting the parent notification. If lifecycle or tree cleanup closes parent delivery before emission, suppress the notification and result path; leave any unpublished temporary file to operating-system cleanup.
 - While parent delivery remains open, send natural completion and failure as visible custom messages containing the full UUID, display name, bounded result preview, and result path. Use follow-up delivery and turn triggering so an idle parent wakes immediately and an active parent finishes its current run first.
-- Use Pi's extension status slot under the `subagents` key. Show up to three `display_name#short-id` handles followed by `+N` for additional children. Suffix waiting handles with `?`. Clear the status when no starting, running, or waiting child remains.
+- Use Pi's extension status slot under the `subagents` key. Show up to three handles followed by `+N` for additional children. Prefix each `display_name#short-id` handle with a static glyph whose semantic theme color applies only to the glyph: dim `◌` for starting, success-colored `*` for running, and warning-colored `?` for waiting. Refresh the status on every transition among those active states. Clear the status when no starting, running, or waiting child remains.
 - Keep status rendering static. Do not add animation, elapsed time, token counts, progress text, a custom footer, or a persistent widget.
 - On parent session shutdown, session switching, or extension reload, close parent delivery first. Cooperatively abort active children without creating results, reject pending questions, suppress unpublished paths and notifications from finalizing children, run child shutdown, dispose every session, clear the registry, and clear footer status.
 - Handle `session_before_tree` as a hard timeline boundary. Before Pi changes the leaf, close launches, controls, and parent delivery; capture every non-disposed display-name/short-ID handle; cooperatively abort active children without creating results; reject pending questions; let finalizing children finish silent disposal; clear the registry and footer; and await cleanup. Do not migrate children.
@@ -213,7 +213,7 @@ The first version limits active subagents using a global configuration value who
 - Verify malformed, short, unknown, and finalizing UUIDs reject message and kill calls, including a formerly valid UUID after disposal.
 - Verify progress includes UUID and display name, creates one visible model-context parent message with follow-up ordering and no parent turn trigger, and resolves the child tool immediately.
 - Verify progress does not alter the footer beyond the active handle and does not appear in the result file.
-- Verify a question includes UUID and display name, creates a visible parent message, triggers the parent, leaves the child tool pending, and marks the footer handle with `?`.
+- Verify a question includes UUID and display name, creates a visible parent message, triggers the parent, leaves the child tool pending, and changes the footer glyph from success-colored `*` to warning-colored `?`.
 - Verify the first `message_subagent` call while a question is pending resolves that exact question rather than steering, removes the waiting marker, and lets the child continue.
 - Verify answering a question does not consume or reorder steering already queued by Pi and that a later message with no pending question uses steering.
 - Verify a second simultaneous question is rejected and no automatic timeout resolves a pending question.
@@ -228,7 +228,7 @@ The first version limits active subagents using a global configuration value who
 - Verify result files are private and remain readable after child disposal.
 - Verify completion and failure notifications are emitted only after child disposal, include UUID and display name, use follow-up delivery with turn triggering enabled, and appear exactly once while parent delivery remains open.
 - Verify a finalizing child releases its concurrency slot and footer position, rejects controls, and loses its registry record at disposal.
-- Verify status shows three display-name/short-ID handles plus `+N`, marks waiting handles with `?`, and clears when no starting, running, or waiting child remains.
+- Verify footer status prefixes starting, running, and waiting handles with only the dim `◌`, success-colored `*`, and warning-colored `?` glyph respectively; refreshes on active-state transitions; shows three handles plus `+N`; and clears when no active child remains.
 - Verify parent session shutdown, switching, and reload abort active children without results, silently dispose finalizing children without publishing paths or notifications, reject pending questions, clear status, and remain idempotent.
 - Verify `session_before_tree` closes launches, controls, and delivery; aborts active children without results; silently disposes finalizing children; rejects questions; clears status before navigation; and ignores late callbacks except for disposal.
 - Verify `session_tree` emits one visible non-triggering cancellation notice with stopped handles and the workspace warning, emits nothing when no child was stopped, and then permits new launches.

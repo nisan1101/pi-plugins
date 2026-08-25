@@ -99,6 +99,7 @@ async function loadExtension(t, createChildSession, overrides = {}) {
       return parentIdle;
     },
     ui: {
+      theme: overrides.theme ?? { fg: (color, text) => `<${color}>${text}</${color}>` },
       setStatus(key, text) {
         statuses.push({ key, text });
       },
@@ -186,8 +187,47 @@ test("launch returns distinct UUID handles without waiting for child startup", a
   assert.equal(creations.length, 4);
   assert.match(
     extension.statuses.at(-1).text,
-    /^(research#[0-9a-f]{8} ){2}research#[0-9a-f]{8} \+1$/i,
+    /^(<dim>◌<\/dim> research#[0-9a-f]{8} ){2}<dim>◌<\/dim> research#[0-9a-f]{8} \+1$/i,
   );
+});
+
+// Footer glyphs distinguish every active lifecycle state without styling the child handle.
+test("footer distinguishes starting, running, and waiting subagents", async (t) => {
+  const startup = deferred();
+  const promptStarted = deferred();
+  const finishPrompt = deferred();
+  let childOptions;
+  const child = fakeChild({
+    async prompt() {
+      promptStarted.resolve();
+      await finishPrompt.promise;
+    },
+  });
+  const extension = await loadExtension(t, async (options) => {
+    childOptions = options;
+    await startup.promise;
+    return child;
+  });
+
+  const launch = await extension.execute({ display_name: "lifecycle", prompt: "Exercise every state." });
+  assert.match(extension.statuses.at(-1).text, /^<dim>◌<\/dim> lifecycle#[0-9a-f]{8}$/i);
+
+  startup.resolve();
+  await promptStarted.promise;
+  assert.match(extension.statuses.at(-1).text, /^<success>\*<\/success> lifecycle#[0-9a-f]{8}$/i);
+
+  const question = callTool(childOptions.messageParentTool, { kind: "question", message: "Continue?" });
+  assert.match(extension.statuses.at(-1).text, /^<warning>\?<\/warning> lifecycle#[0-9a-f]{8}$/i);
+
+  await extension.message({ id: launch.details.id, message: "Continue." });
+  await question;
+  assert.match(extension.statuses.at(-1).text, /^<success>\*<\/success> lifecycle#[0-9a-f]{8}$/i);
+
+  finishPrompt.resolve();
+  await waitFor(() => extension.sent.some(({ message }) => message.customType === "subagent-completed"));
+  const resultPath = extension.sent.find(({ message }) => message.customType === "subagent-completed").message.details
+    .result_path;
+  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
 });
 
 // Parent guidance stays bound to a full UUID and switches from startup buffering to native steering.
@@ -336,7 +376,7 @@ test("parent answer resolves one waiting question and later messages resume stee
   await Promise.resolve();
 
   assert.equal(questionSettled, false);
-  assert.match(extension.statuses.at(-1).text, /asker#[0-9a-f]{8}\?$/i);
+  assert.match(extension.statuses.at(-1).text, /^<warning>\?<\/warning> asker#[0-9a-f]{8}$/i);
   assert.deepEqual(
     extension.sent.map(({ message }) => message.customType),
     ["subagent-progress", "subagent-question"],
@@ -836,7 +876,7 @@ test("completion wins kill and releases its slot before disposal", async (t) => 
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
   await assert.rejects(extension.kill({ id: launch.details.id }), /no active subagent/i);
   const replacement = await extension.execute({ display_name: "replacement", prompt: "Use the free slot." });
-  assert.match(extension.statuses.at(-1).text, /^replacement#[0-9a-f]{8}$/i);
+  assert.match(extension.statuses.at(-1).text, /^<dim>◌<\/dim> replacement#[0-9a-f]{8}$/i);
   assert.notEqual(replacement.details.id, launch.details.id);
 
   allowShutdown.resolve();
@@ -1156,7 +1196,10 @@ test("global concurrency configuration bounds active launches", async (t) => {
           message === "Invalid maxConcurrent in subagents.json; using 4." && type === "warning",
       ),
     );
-    assert.match(fallback.statuses.at(-1).text, /^a#[0-9a-f]{8} b#[0-9a-f]{8} c#[0-9a-f]{8} \+1$/i);
+    assert.match(
+      fallback.statuses.at(-1).text,
+      /^<dim>◌<\/dim> a#[0-9a-f]{8} <dim>◌<\/dim> b#[0-9a-f]{8} <dim>◌<\/dim> c#[0-9a-f]{8} \+1$/i,
+    );
   }
 });
 
