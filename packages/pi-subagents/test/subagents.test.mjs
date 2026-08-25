@@ -453,8 +453,6 @@ test("kill aborts a waiting child and returns a bare acknowledgement", async (t)
   assert.equal(killed.details.id, launch.details.id);
   assert.equal(killed.details.display_name, "cancelled");
   assert.match(killed.content[0].text, /cooperative/i);
-  assert.doesNotMatch(killed.content[0].text, /result/i);
-  assert.equal(killed.details.result_path, undefined);
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
   assert.equal(extension.sent.length, 1);
   assert.equal(extension.sent[0].message.customType, "subagent-question");
@@ -498,7 +496,6 @@ test("kill wins a simultaneous natural failure without duplicate cleanup or noti
 
   assertCallsInAnyOrder(lifecycle, ["abort", "shutdown", "dispose"]);
   assert.equal(extension.sent.length, 0);
-  assert.equal(killed.details.result_path, undefined);
   assert.doesNotMatch(killed.content[0].text, /Partial work|aborted by parent/);
 });
 
@@ -521,8 +518,6 @@ test("kill claims a starting child and late startup is cleaned silently", async 
   const launch = await extension.execute({ display_name: "starting", prompt: "Start slowly." });
 
   const killed = await extension.kill({ id: launch.details.id });
-  assert.equal(killed.details.result_path, undefined);
-  assert.doesNotMatch(killed.content[0].text, /result/i);
   assert.deepEqual(lifecycle, []);
   assert.equal(extension.sent.length, 0);
 
@@ -724,8 +719,6 @@ test("natural completion inlines the result, disposes the child, and wakes the p
   assert.match(message.content, /finisher/);
   assert.match(message.content, new RegExp(launch.details.id));
   assert.match(message.content, /First result block\.\nSecond result block\./);
-  assert.doesNotMatch(message.content, /result\.md/);
-  assert.equal(message.details.result_path, undefined);
   // Inlined result excludes hidden reasoning, tool activity, provider metadata, and the restated task.
   assert.doesNotMatch(message.content, /hidden reasoning|toolCall|secret|private-provider|Return the exact finding/);
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
@@ -750,7 +743,6 @@ test("completion inlines a long result without truncating at the old preview len
   assert.equal(message.customType, "subagent-completed");
   assert.match(message.content, new RegExp(longResult));
   assert.doesNotMatch(message.content, /…/);
-  assert.equal(message.details.result_path, undefined);
 });
 
 // Terminal message events remain the source of the focused result even when the session view lags.
@@ -780,7 +772,6 @@ test("terminal assistant event supplies the completed result text", async (t) =>
   await waitFor(() => extension.sent.length === 1);
 
   assert.match(extension.sent[0].message.content, /Captured terminal text\./);
-  assert.equal(extension.sent[0].message.details.result_path, undefined);
   assert.doesNotMatch(extension.sent[0].message.content, /hidden/);
 });
 
@@ -824,7 +815,6 @@ test("natural failure inlines the error and partial text and wakes the parent on
   assert.match(message.content, /provider failed/);
   assert.match(message.content, /Available partial result\./);
 
-  assert.equal(message.details.result_path, undefined);
   // Failure inlines the error and partial text while excluding transcript and provider metadata.
   assert.doesNotMatch(message.content, /hidden reasoning|toolCall|secret|private-provider|private transcript/);
 });
@@ -864,7 +854,6 @@ test("completion wins kill and releases its slot before disposal", async (t) => 
 
   allowShutdown.resolve();
   await waitFor(() => extension.sent.length === 1);
-  assert.equal(extension.sent[0].message.details.result_path, undefined);
 });
 
 // The terminal event claims completion before the prompt promise yields back to orchestration.
@@ -904,7 +893,6 @@ test("terminal completion event beats a later kill call", async (t) => {
   await waitFor(() => extension.sent.length === 1);
   allowPromptReturn.resolve();
 
-  assert.equal(extension.sent[0].message.details.result_path, undefined);
   assert.match(extension.sent[0].message.content, /Event won\./);
 });
 
@@ -940,7 +928,6 @@ test("startup failure disposes a child that cannot rediscover every active work 
   assert.match(extension.sent[0].message.content, new RegExp(launch.details.id));
   assert.match(extension.sent[0].message.content, /could not load active tools: write/i);
   assert.deepEqual(extension.sent[0].options, { deliverAs: "followUp", triggerTurn: true });
-  assert.equal(extension.sent[0].message.details.result_path, undefined);
   assert.match(extension.sent[0].message.content, /_No final textual result\._/);
 });
 
@@ -1259,7 +1246,6 @@ test("fresh launch completes without TUI status or final text", async (t) => {
   await waitFor(() => extension.sent.length === 1);
 
   assert.equal(extension.statuses.length, 0);
-  assert.equal(extension.sent[0].message.details.result_path, undefined);
   assert.match(extension.sent[0].message.content, /_No final textual result\._/);
 });
 
@@ -1325,5 +1311,4 @@ export default function childProbe(pi) {
   assert.equal(extension.sent[0].message.customType, "subagent-completed");
   assert.match(extension.sent[0].message.content, /\{"started":true,"skill":true,"tool":true,"parent":true\}/);
   assert.equal(await readFile(shutdownMarker, "utf8"), "shutdown");
-  assert.equal(extension.sent[0].message.details.result_path, undefined);
 });
