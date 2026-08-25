@@ -73,6 +73,16 @@ From launch onward, each child appends a private plain-text activity log to `<tm
 
 The file is created at launch and only ever appended, so you can follow a running child live—for example `tail -n +1 -F "<path>"`—and attaching later still shows prior history. The per-parent-process directory is removed on shutdown and `/tree` navigation cleanup.
 
+## Live viewer
+
+In interactive (TUI) mode, `/subagents` opens an arrow-key picker of the active children (display name, short UUID prefix, and lifecycle phase). Enter selects; Esc cancels. Selecting a child opens its live output in an external multiplexer window that follow-tails the activity log from its start—Pi never renders the transcript itself.
+
+Display support is pluggable: an ordered list of backends is tried and the first available one is used. The built-in list ships one backend:
+
+- **zellij** — available when Pi runs inside a zellij session and the `zellij` binary is on `PATH`. Opens a named floating pane running `tail -n +1 -F "<log>"`.
+
+When no supported multiplexer is available—or when opening one fails—the command surfaces the exact manual command to watch the log yourself (`tail -n +1 -F "<log>"`) plus a nudge to run Pi inside a supported multiplexer. That command is shown in the UI only and is never injected into parent-model context. The viewer is read-only: it cannot steer, answer, or kill the child. Outside interactive mode, `/subagents` reports that it needs interactive mode and does nothing.
+
 
 ## Lifecycle and limitations
 

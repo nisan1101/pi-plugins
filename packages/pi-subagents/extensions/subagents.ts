@@ -13,6 +13,7 @@ import {
   type AgentToolResult,
   type CreateAgentSessionOptions,
   type ExtensionAPI,
+  type ExtensionCommandContext,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -24,6 +25,12 @@ import {
   type SubagentLogBridge,
   type SubagentLogEvent,
 } from "./subagent-log.ts";
+import {
+  defaultDisplays,
+  tailCommand,
+  type SubagentDisplay,
+  type SubagentView,
+} from "./subagent-display.ts";
 
 const CONFIG_FILE = "subagents.json";
 const DEFAULT_MAX_CONCURRENT = 4;
@@ -104,7 +111,7 @@ interface ChildRecord {
   finalization?: Promise<void>;
   lastAssistant?: ChildMessage;
   unsubscribe?: () => void;
-  log?: SubagentLog;
+  log: SubagentLog;
 }
 
 interface MessageParentDetails {
@@ -116,6 +123,7 @@ interface MessageParentDetails {
 interface SubagentsExtensionOptions {
   createChildSession?: CreateChildSession;
   logBridge?: SubagentLogBridge;
+  displays?: readonly SubagentDisplay[];
 }
 
 async function createPiChildSession(options: ChildSessionOptions): Promise<ChildSession> {
@@ -210,16 +218,16 @@ function renderStatus(
   records: Iterable<ChildRecord>,
   theme?: ExtensionContext["ui"]["theme"],
 ): string | undefined {
-  const handles = [...records].filter(isActive).map(({ displayName, id, state }) => {
-    const handle = `${displayName}#${id.slice(0, 8)}`;
-    if (!theme) return handle;
+  const handles = [...records].filter(isActive).map((record) => {
+    const label = handle(record);
+    if (!theme) return label;
     const glyph =
-      state.phase === "starting"
+      record.state.phase === "starting"
         ? theme.fg("dim", "◌")
-        : state.phase === "running"
+        : record.state.phase === "running"
           ? theme.fg("success", "*")
           : theme.fg("warning", "?");
-    return `${glyph} ${handle}`;
+    return `${glyph} ${label}`;
   });
   if (handles.length === 0) return undefined;
   const visible = handles.slice(0, 3);
@@ -239,6 +247,25 @@ function errorMessage(error: unknown): string {
 // the extension emits raw wall-clock only and never computes elapsed time or deltas.
 function wallClock(): string {
   return new Date().toISOString();
+}
+
+// The subagent's display handle: display name plus short UUID prefix.
+function handle(record: Pick<ChildRecord, "displayName" | "id">): string {
+  return `${record.displayName}#${record.id.slice(0, 8)}`;
+}
+
+// Picker row: the handle plus lifecycle phase for one active subagent.
+function pickerLabel(record: ChildRecord): string {
+  return `${handle(record)} (${record.state.phase})`;
+}
+
+// Surface the manual follow-tail through the UI only, never into parent-model context.
+function surfaceManualTail(ctx: ExtensionCommandContext, logPath: string, nudge: boolean): void {
+  const lines = ["Watch it manually:", tailCommand(logPath)];
+  if (nudge) {
+    lines.push("", "Run Pi inside a supported multiplexer (e.g. zellij) for an automatic viewer.");
+  }
+  ctx.ui.notify(lines.join("\n"), "info");
 }
 
 async function readConfig(agentDir: string, ctx: ExtensionContext): Promise<SubagentsConfig> {
@@ -325,13 +352,12 @@ function resolveProfile(
 export function createSubagentsExtension({
   createChildSession = createPiChildSession,
   logBridge = createFileLogBridge(),
+  displays = defaultDisplays,
 }: SubagentsExtensionOptions = {}) {
   return function subagents(pi: ExtensionAPI) {
     const children = new Map<string, ChildRecord>();
     const writeLog = (record: ChildRecord, event: SubagentLogEvent) => {
-      const log = record.log;
-      if (!log) return;
-      for (const line of formatSubagentLog(event, new Date())) log.append(line);
+      for (const line of formatSubagentLog(event, new Date())) record.log.append(line);
     };
     let controlsOpen = true;
     let deliveryOpen = true;
@@ -614,9 +640,7 @@ export function createSubagentsExtension({
 
     // ponytail: later tree cancellation can leave children stopped; keep this safety-first boundary until Pi adds a confirmed pre-commit hook.
     pi.on("session_before_tree", async (_event, ctx) => {
-      treeStoppedHandles = [...children.values()].map(
-        ({ displayName, id }) => `${displayName}#${id.slice(0, 8)}`,
-      );
+      treeStoppedHandles = [...children.values()].map(handle);
       await cleanupOwnedChildren(ctx);
     });
 
@@ -744,13 +768,14 @@ export function createSubagentsExtension({
           ctx.thinkingLevel ?? pi.getThinkingLevel(),
         );
 
+        const id = randomUUID();
         const record: ChildRecord = {
-          id: randomUUID(),
+          id,
           displayName: display_name,
           prompt,
           state: { phase: "starting", guidance: [] },
+          log: logBridge.open(id),
         };
-        record.log = logBridge.open(record.id);
         children.set(record.id, record);
         updateStatus(ctx);
 
@@ -782,6 +807,43 @@ export function createSubagentsExtension({
           ],
           details: { id: record.id, display_name: record.displayName },
         };
+      },
+    });
+
+    pi.registerCommand("subagents", {
+      description: "Watch one active subagent's live output in an external multiplexer.",
+      handler: async (_args, ctx) => {
+        if (ctx.mode !== "tui") {
+          ctx.ui.notify("/subagents requires interactive mode.", "warning");
+          return;
+        }
+        const active = [...children.values()].filter(isActive);
+        if (active.length === 0) {
+          ctx.ui.notify("No active subagents to watch.", "info");
+          return;
+        }
+
+        const byLabel = new Map(active.map((record) => [pickerLabel(record), record]));
+        const choice = await ctx.ui.select("Watch a subagent:", [...byLabel.keys()]);
+        const record = choice ? byLabel.get(choice) : undefined;
+        if (!record) return; // Esc or dismissed selector: back out without opening anything.
+
+        const logPath = record.log.path;
+        const view: SubagentView = {
+          subagentId: record.id,
+          title: handle(record),
+          logPath,
+        };
+        const backend = displays.find((display) => display.isAvailable());
+        if (!backend) {
+          surfaceManualTail(ctx, logPath, true);
+          return;
+        }
+        try {
+          await backend.show(view);
+        } catch {
+          surfaceManualTail(ctx, logPath, false);
+        }
       },
     });
   };

@@ -63,6 +63,8 @@ async function loadExtension(t, createChildSession, overrides = {}) {
   });
 
   const tools = new Map();
+  const commands = new Map();
+  const selectCalls = [];
   const statuses = [];
   const warnings = [];
   const sent = [];
@@ -80,11 +82,14 @@ async function loadExtension(t, createChildSession, overrides = {}) {
       logCleanups += 1;
     },
   };
-  createSubagentsExtension({ createChildSession, logBridge })({
+  createSubagentsExtension({ createChildSession, logBridge, displays: overrides.displays ?? [] })({
     on(event, handler) {
       const eventHandlers = handlers.get(event) ?? [];
       eventHandlers.push(handler);
       handlers.set(event, eventHandlers);
+    },
+    registerCommand(name, definition) {
+      commands.set(name, definition);
     },
     registerTool(definition) {
       tools.set(definition.name, definition);
@@ -126,6 +131,12 @@ async function loadExtension(t, createChildSession, overrides = {}) {
       notify(message, type) {
         warnings.push({ message, type });
       },
+      async select(title, options) {
+        selectCalls.push({ title, options });
+        const choose = overrides.selectChoice;
+        if (typeof choose === "function") return choose(options);
+        return choose;
+      },
     },
   };
 
@@ -151,9 +162,15 @@ async function loadExtension(t, createChildSession, overrides = {}) {
     setIdle(value) {
       parentIdle = value;
     },
+    selectCalls,
     execute: (params) => executeTool("subagent", params),
     message: (params) => executeTool("message_subagent", params),
     kill: (params) => executeTool("kill_subagent", params),
+    runSubagents: (args = "") => {
+      const command = commands.get("subagents");
+      assert.ok(command, "subagents command is registered");
+      return command.handler(args, context);
+    },
   };
 }
 
@@ -168,8 +185,12 @@ test("repository package installs the fresh subagent parent tools", async () => 
 
   const { default: installedExtension } = await import(new URL(entry, repositoryRoot));
   const tools = new Map();
+  const commands = new Map();
   installedExtension({
     on() {},
+    registerCommand(name, definition) {
+      commands.set(name, definition);
+    },
     registerTool(tool) {
       tools.set(tool.name, tool);
     },
@@ -177,6 +198,7 @@ test("repository package installs the fresh subagent parent tools", async () => 
 
   assert.deepEqual([...tools.keys()].sort(), ["kill_subagent", "message_subagent", "subagent"]);
   assert.equal(tools.has("message_parent"), false);
+  assert.deepEqual([...commands.keys()], ["subagents"]);
   const launchSchema = tools.get("subagent").parameters;
   assert.deepEqual(Object.keys(launchSchema.properties).sort(), ["display_name", "model_profile", "prompt"]);
   assert.deepEqual([...launchSchema.required].sort(), ["display_name", "prompt"]);
@@ -1466,3 +1488,142 @@ test("the log directory is cleaned on shutdown and on tree navigation", async (t
   assert.equal(tree.getLogCleanups(), 1);
 });
 
+
+// A fake display backend spies on show(view) and simulates availability and spawn failure.
+function fakeDisplay({ available = true, fail = false } = {}) {
+  const shown = [];
+  return {
+    shown,
+    display: {
+      id: "fake",
+      isAvailable: () => available,
+      async show(view) {
+        shown.push(view);
+        if (fail) throw new Error("show failed");
+      },
+    },
+  };
+}
+
+// Launch one child and wait until it is running so /subagents lists it as active.
+async function launchRunning(t, overrides, name = "research") {
+  const promptStarted = deferred();
+  const run = deferred();
+  const child = fakeChild({
+    async prompt() {
+      promptStarted.resolve();
+      await run.promise;
+    },
+  });
+  const extension = await loadExtension(t, async () => child, overrides);
+  const launch = await extension.execute({ display_name: name, prompt: "Inspect the API." });
+  await promptStarted.promise;
+  t.after(() => run.resolve());
+  return { extension, launch };
+}
+
+// Outside interactive mode the command explains the requirement and opens nothing.
+test("/subagents requires interactive mode", async (t) => {
+  const { display, shown } = fakeDisplay();
+  const { extension } = await launchRunning(t, { mode: "print", displays: [display] });
+
+  await extension.runSubagents();
+
+  assert.equal(extension.selectCalls.length, 0);
+  assert.equal(shown.length, 0);
+  assert.ok(
+    extension.warnings.some(
+      ({ message, type }) => /requires interactive mode/i.test(message) && type === "warning",
+    ),
+  );
+});
+
+// With no active subagents the command explains the empty state instead of showing a picker.
+test("/subagents notifies when there are no active subagents", async (t) => {
+  const { display, shown } = fakeDisplay();
+  const extension = await loadExtension(t, async () => fakeChild(), { displays: [display] });
+
+  await extension.runSubagents();
+
+  assert.equal(extension.selectCalls.length, 0);
+  assert.equal(shown.length, 0);
+  assert.ok(extension.warnings.some(({ message }) => /no active subagents/i.test(message)));
+});
+
+// The picker lists each active subagent by display name, short UUID prefix, and phase.
+test("/subagents shows a picker of the active subagents", async (t) => {
+  const { display } = fakeDisplay();
+  const { extension, launch } = await launchRunning(t, { displays: [display] });
+
+  await extension.runSubagents();
+
+  assert.equal(extension.selectCalls.length, 1);
+  assert.deepEqual(extension.selectCalls[0].options, [
+    `research#${launch.details.id.slice(0, 8)} (running)`,
+  ]);
+});
+
+// Selecting a subagent with an available backend opens its live output via show(view).
+test("/subagents opens the selected subagent in the available backend", async (t) => {
+  const { display, shown } = fakeDisplay();
+  const { extension, launch } = await launchRunning(t, {
+    displays: [display],
+    selectChoice: (options) => options[0],
+  });
+
+  await extension.runSubagents();
+
+  // The view carries only the read-only identity, title, and log path — no control handles.
+  assert.deepEqual(shown, [
+    {
+      subagentId: launch.details.id,
+      title: `research#${launch.details.id.slice(0, 8)}`,
+      logPath: `/fake/${launch.details.id}.log`,
+    },
+  ]);
+  assert.equal(extension.sent.length, 0);
+});
+
+// Esc (an undefined selection) backs out without opening a viewer or notifying.
+test("/subagents cancels cleanly when the picker is dismissed", async (t) => {
+  const { display, shown } = fakeDisplay();
+  const { extension } = await launchRunning(t, { displays: [display] });
+
+  await extension.runSubagents();
+
+  assert.equal(extension.selectCalls.length, 1);
+  assert.equal(shown.length, 0);
+  assert.equal(extension.warnings.length, 0);
+});
+
+// With no available backend the picker still shows, then surfaces the manual tail plus a nudge.
+test("/subagents surfaces the manual tail command when no backend is available", async (t) => {
+  const { extension, launch } = await launchRunning(t, {
+    displays: [fakeDisplay({ available: false }).display],
+    selectChoice: (options) => options[0],
+  });
+
+  await extension.runSubagents();
+
+  assert.equal(extension.selectCalls.length, 1);
+  assert.equal(extension.sent.length, 0);
+  const notice = extension.warnings.at(-1);
+  assert.match(notice.message, new RegExp(`tail -n \\+1 -F "/fake/${launch.details.id}.log"`));
+  assert.match(notice.message, /multiplexer/i);
+});
+
+// If the available backend fails to open, the command falls back to the same manual tail.
+test("/subagents falls back to the manual tail when show() fails", async (t) => {
+  const { display } = fakeDisplay({ fail: true });
+  const { extension, launch } = await launchRunning(t, {
+    displays: [display],
+    selectChoice: (options) => options[0],
+  });
+
+  await extension.runSubagents();
+
+  assert.equal(extension.sent.length, 0);
+  const notice = extension.warnings.at(-1);
+  assert.match(notice.message, new RegExp(`tail -n \\+1 -F "/fake/${launch.details.id}.log"`));
+  assert.doesNotMatch(notice.message, /multiplexer/i);
+});
