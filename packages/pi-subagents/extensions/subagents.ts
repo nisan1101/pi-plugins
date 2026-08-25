@@ -710,7 +710,7 @@ export function createSubagentsExtension({
       name: "subagent",
       label: "Subagent",
       description:
-        "Launch one fresh in-process background subagent for a narrow delegated task. It runs in the background and you are woken automatically when it finishes or asks a question, so never poll it or stay in the turn only to watch it. After launching, decide for yourself: keep working on anything that does not touch the delegated scope, or end your turn — you lose nothing by stopping, because the subagent will wake you. Do not modify a delegated scope while its returned UUID remains active.",
+        "Launch one fresh background subagent for a narrow delegated task. You are woken automatically when it finishes or asks a question. It shares your working directory, so don't edit the files it's working on until it finishes.",
       parameters: Type.Object({
         display_name: Type.String({ minLength: 1 }),
         prompt: Type.String({ minLength: 1 }),

@@ -30,7 +30,7 @@ const QQ_INSTRUCTION =
 
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("qq", {
-		description: "Ask a one-off question with full context; not saved to context",
+		description: "Ask a one-off question with full context; nothing is saved to the session",
 		handler: async (args, ctx) => {
 			const question = args.trim();
 			if (!question) {
