@@ -16,7 +16,7 @@ The repository manifest loads this extension automatically alongside the other p
 
 | Tool | Parameters | Behavior |
 | --- | --- | --- |
-| `subagent` | `display_name`, `prompt`, optional `model_profile` | Starts a child in the background and immediately returns a full UUID. Call it by itself after other tool calls; a successful launch terminates the parent run. |
+| `subagent` | `display_name`, `prompt`, optional `model_profile` | Starts a child in the background and immediately returns a full UUID. Launch does not force the parent run to end: the parent is woken automatically when the child finishes or asks a question, so after launching it can keep working on unrelated scope or end its turn. |
 | `message_subagent` | full `id`, `message` | Steers the addressed child, or answers its pending question. |
 | `kill_subagent` | full `id` | Cooperatively stops the addressed child and returns a bare acknowledgement (no result). |
 

@@ -710,7 +710,7 @@ export function createSubagentsExtension({
       name: "subagent",
       label: "Subagent",
       description:
-        "Launch one fresh in-process background subagent. Call this tool by itself after other tool calls finish; every successful launch terminates the current parent run. Do not modify the delegated scope while its returned UUID remains active.",
+        "Launch one fresh in-process background subagent for a narrow delegated task. It runs in the background and you are woken automatically when it finishes or asks a question, so never poll it or stay in the turn only to watch it. After launching, decide for yourself: keep working on anything that does not touch the delegated scope, or end your turn — you lose nothing by stopping, because the subagent will wake you. Do not modify a delegated scope while its returned UUID remains active.",
       parameters: Type.Object({
         display_name: Type.String({ minLength: 1 }),
         prompt: Type.String({ minLength: 1 }),
@@ -764,14 +764,15 @@ export function createSubagentsExtension({
             {
               type: "text" as const,
               text:
-                `Started ${record.displayName} (${record.id}).` +
+                `Started ${record.displayName} (${record.id}). ` +
+                "It runs in the background; you will be woken when it finishes or needs an answer, " +
+                "so do not wait or poll — continue with unrelated work or end your turn." +
                 (model_profile === resolvedProfile.profile
                   ? ""
                   : ` Model profile ${model_profile} is not configured; using inherit.`),
             },
           ],
           details: { id: record.id, display_name: record.displayName },
-          terminate: true,
         };
       },
     });
