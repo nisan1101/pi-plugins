@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 
 import { fauxProvider } from "@earendil-works/pi-ai";
@@ -225,9 +225,6 @@ test("footer distinguishes starting, running, and waiting subagents", async (t) 
 
   finishPrompt.resolve();
   await waitFor(() => extension.sent.some(({ message }) => message.customType === "subagent-completed"));
-  const resultPath = extension.sent.find(({ message }) => message.customType === "subagent-completed").message.details
-    .result_path;
-  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
 });
 
 // Parent guidance stays bound to a full UUID and switches from startup buffering to native steering.
@@ -405,8 +402,8 @@ test("parent answer resolves one waiting question and later messages resume stee
   assert.deepEqual(steered, ["Queued before the question.", "Continue."]);
 });
 
-// Explicit kill owns the terminal result, rejects a blocked question, and never sends a second wake.
-test("kill aborts a waiting child and returns its private partial result", async (t) => {
+// Explicit kill acknowledges with no result, rejects a blocked question, and never sends a second wake.
+test("kill aborts a waiting child and returns a bare acknowledgement", async (t) => {
   const run = deferred();
   const promptStarted = deferred();
   const lifecycle = [];
@@ -456,20 +453,16 @@ test("kill aborts a waiting child and returns its private partial result", async
   assert.equal(killed.details.id, launch.details.id);
   assert.equal(killed.details.display_name, "cancelled");
   assert.match(killed.content[0].text, /cooperative/i);
-  assert.match(killed.content[0].text, /result\.md/);
+  assert.doesNotMatch(killed.content[0].text, /result/i);
+  assert.equal(killed.details.result_path, undefined);
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
   assert.equal(extension.sent.length, 1);
   assert.equal(extension.sent[0].message.customType, "subagent-question");
   await assert.rejects(extension.kill({ id: launch.details.id }), /no active subagent/i);
   await assert.rejects(extension.message({ id: launch.details.id, message: "Too late." }), /no active subagent/i);
 
-  const resultPath = killed.details.result_path;
-  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
-  assert.equal((await stat(resultPath)).mode & 0o777, 0o600);
-  const result = await readFile(resultPath, "utf8");
-  assert.match(result, /Status: killed/);
-  assert.match(result, /## Partial result\n\nWork completed before cancellation\./);
-  assert.doesNotMatch(result, /hidden reasoning/);
+  // Kill returns a bare acknowledgement: no partial text carried back.
+  assert.doesNotMatch(killed.content[0].text, /Work completed before cancellation/);
 });
 
 // A kill claimed before prompt failure remains the only terminal outcome and cleanup owner.
@@ -505,11 +498,8 @@ test("kill wins a simultaneous natural failure without duplicate cleanup or noti
 
   assertCallsInAnyOrder(lifecycle, ["abort", "shutdown", "dispose"]);
   assert.equal(extension.sent.length, 0);
-  const resultPath = killed.details.result_path;
-  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
-  const result = await readFile(resultPath, "utf8");
-  assert.match(result, /Status: killed/);
-  assert.doesNotMatch(result, /aborted by parent/);
+  assert.equal(killed.details.result_path, undefined);
+  assert.doesNotMatch(killed.content[0].text, /Partial work|aborted by parent/);
 });
 
 // Killing during construction returns immediately and disposes the child if startup later finishes.
@@ -531,11 +521,8 @@ test("kill claims a starting child and late startup is cleaned silently", async 
   const launch = await extension.execute({ display_name: "starting", prompt: "Start slowly." });
 
   const killed = await extension.kill({ id: launch.details.id });
-  const resultPath = killed.details.result_path;
-  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
-  const result = await readFile(resultPath, "utf8");
-  assert.match(result, /Status: killed/);
-  assert.match(result, /## Partial result\n\n_No final textual result\._/);
+  assert.equal(killed.details.result_path, undefined);
+  assert.doesNotMatch(killed.content[0].text, /result/i);
   assert.deepEqual(lifecycle, []);
   assert.equal(extension.sent.length, 0);
 
@@ -583,6 +570,8 @@ test("launch creates one fresh child with inherited capabilities and a delimited
   assert.match(creation.systemPrompt, /modify files only when.*explicitly asks/i);
   assert.match(creation.systemPrompt, /never revert unrelated changes/i);
   assert.match(creation.systemPrompt, /conflicts.*stop and report/i);
+  assert.match(creation.systemPrompt, /final assistant message is delivered to the parent verbatim/i);
+  assert.match(creation.systemPrompt, /artifacts only when the delegated task asks/i);
   assert.match(creation.systemPrompt, /message_parent.*meaningful milestones.*question/i);
   assert.equal(child.messages.length, 0);
   assert.equal(prompts.length, 1);
@@ -685,12 +674,6 @@ test("unconfigured model profiles visibly fall back to inherited model", async (
     assert.equal(creations[0].thinkingLevel, "high");
 
     await waitFor(() => extension.sent.length === 1);
-    const resultPath = extension.sent[0].message.details.result_path;
-    t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
-    const result = await readFile(resultPath, "utf8");
-    assert.match(result, /Model profile: inherit/);
-    assert.match(result, /Model: test\/parent-model/);
-    assert.match(result, /Thinking level: high/);
   }
 });
 
@@ -702,8 +685,8 @@ async function waitFor(predicate) {
   assert.fail("Timed out waiting for background subagent work.");
 }
 
-// Successful completion publishes one durable focused result only after child disposal.
-test("natural completion writes a private result, disposes the child, and wakes the parent once", async (t) => {
+// Successful completion inlines one focused result only after child disposal.
+test("natural completion inlines the result, disposes the child, and wakes the parent once", async (t) => {
   const lifecycle = [];
   const child = fakeChild({
     messages: [
@@ -741,26 +724,33 @@ test("natural completion writes a private result, disposes the child, and wakes 
   assert.match(message.content, /finisher/);
   assert.match(message.content, new RegExp(launch.details.id));
   assert.match(message.content, /First result block\.\nSecond result block\./);
-  assert.match(message.content, /result\.md/);
+  assert.doesNotMatch(message.content, /result\.md/);
+  assert.equal(message.details.result_path, undefined);
+  // Inlined result excludes hidden reasoning, tool activity, provider metadata, and the restated task.
+  assert.doesNotMatch(message.content, /hidden reasoning|toolCall|secret|private-provider|Return the exact finding/);
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
-
-  const resultPath = message.details.result_path;
-  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
-  assert.equal((await stat(resultPath)).mode & 0o777, 0o600);
-  const result = await readFile(resultPath, "utf8");
-  assert.match(result, new RegExp(launch.details.id));
-  assert.match(result, /Display name: finisher/);
-  assert.match(result, /Status: completed/);
-  assert.match(result, /Model profile: inherit/);
-  assert.match(result, /Model: test\/parent-model/);
-  assert.match(result, /Thinking level: high/);
-  assert.match(result, /Return the exact finding\./);
-  assert.match(result, /First result block\.\nSecond result block\./);
-  assert.doesNotMatch(result, /hidden reasoning|toolCall|secret|private-provider|transcript text/);
   await assert.rejects(
     extension.message({ id: launch.details.id, message: "Too late." }),
     /no active subagent/i,
   );
+});
+
+// The full terminal text is inlined verbatim, past the old bounded-preview boundary.
+test("completion inlines a long result without truncating at the old preview length", async (t) => {
+  const longResult = "X".repeat(2000);
+  const child = fakeChild({
+    messages: [{ role: "assistant", content: [{ type: "text", text: longResult }] }],
+  });
+  const extension = await loadExtension(t, async () => child);
+
+  await extension.execute({ display_name: "verbose", prompt: "Produce a long answer." });
+  await waitFor(() => extension.sent.length === 1);
+
+  const { message } = extension.sent[0];
+  assert.equal(message.customType, "subagent-completed");
+  assert.match(message.content, new RegExp(longResult));
+  assert.doesNotMatch(message.content, /…/);
+  assert.equal(message.details.result_path, undefined);
 });
 
 // Terminal message events remain the source of the focused result even when the session view lags.
@@ -790,15 +780,12 @@ test("terminal assistant event supplies the completed result text", async (t) =>
   await waitFor(() => extension.sent.length === 1);
 
   assert.match(extension.sent[0].message.content, /Captured terminal text\./);
-  const resultPath = extension.sent[0].message.details.result_path;
-  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
-  const result = await readFile(resultPath, "utf8");
-  assert.match(result, /Captured terminal text\./);
-  assert.doesNotMatch(result, /hidden/);
+  assert.equal(extension.sent[0].message.details.result_path, undefined);
+  assert.doesNotMatch(extension.sent[0].message.content, /hidden/);
 });
 
-// Provider failures retain their visible partial answer without leaking the child transcript.
-test("natural failure writes focused error metadata and wakes the parent once", async (t) => {
+// Provider failures inline their visible partial answer without leaking the child transcript.
+test("natural failure inlines the error and partial text and wakes the parent once", async (t) => {
   const lifecycle = [];
   const child = fakeChild({
     messages: [
@@ -837,13 +824,9 @@ test("natural failure writes focused error metadata and wakes the parent once", 
   assert.match(message.content, /provider failed/);
   assert.match(message.content, /Available partial result\./);
 
-  const resultPath = message.details.result_path;
-  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
-  const result = await readFile(resultPath, "utf8");
-  assert.match(result, /Status: failed/);
-  assert.match(result, /## Error\n\nprovider failed/);
-  assert.match(result, /## Partial result\n\nAvailable partial result\./);
-  assert.doesNotMatch(result, /hidden reasoning|toolCall|secret|private-provider|private transcript/);
+  assert.equal(message.details.result_path, undefined);
+  // Failure inlines the error and partial text while excluding transcript and provider metadata.
+  assert.doesNotMatch(message.content, /hidden reasoning|toolCall|secret|private-provider|private transcript/);
 });
 
 // Once terminal finalization begins, the UUID stops accepting controls and leaves active status.
@@ -881,8 +864,7 @@ test("completion wins kill and releases its slot before disposal", async (t) => 
 
   allowShutdown.resolve();
   await waitFor(() => extension.sent.length === 1);
-  const resultPath = extension.sent[0].message.details.result_path;
-  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
+  assert.equal(extension.sent[0].message.details.result_path, undefined);
 });
 
 // The terminal event claims completion before the prompt promise yields back to orchestration.
@@ -922,9 +904,8 @@ test("terminal completion event beats a later kill call", async (t) => {
   await waitFor(() => extension.sent.length === 1);
   allowPromptReturn.resolve();
 
-  const resultPath = extension.sent[0].message.details.result_path;
-  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
-  assert.match(await readFile(resultPath, "utf8"), /Status: completed[\s\S]*Event won\./);
+  assert.equal(extension.sent[0].message.details.result_path, undefined);
+  assert.match(extension.sent[0].message.content, /Event won\./);
 });
 
 // Configuration-equivalent inheritance fails visibly instead of silently dropping a parent work tool.
@@ -959,12 +940,8 @@ test("startup failure disposes a child that cannot rediscover every active work 
   assert.match(extension.sent[0].message.content, new RegExp(launch.details.id));
   assert.match(extension.sent[0].message.content, /could not load active tools: write/i);
   assert.deepEqual(extension.sent[0].options, { deliverAs: "followUp", triggerTurn: true });
-  const resultPath = extension.sent[0].message.details.result_path;
-  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
-  const result = await readFile(resultPath, "utf8");
-  assert.match(result, /Status: failed/);
-  assert.match(result, /## Error\n\nChild could not load active tools: write/);
-  assert.match(result, /## Partial result\n\n_No final textual result\._/);
+  assert.equal(extension.sent[0].message.details.result_path, undefined);
+  assert.match(extension.sent[0].message.content, /_No final textual result\._/);
 });
 
 // Parent lifecycle cleanup closes delivery before aborting every owned child and is idempotent.
@@ -1282,9 +1259,7 @@ test("fresh launch completes without TUI status or final text", async (t) => {
   await waitFor(() => extension.sent.length === 1);
 
   assert.equal(extension.statuses.length, 0);
-  const resultPath = extension.sent[0].message.details.result_path;
-  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
-  assert.match(await readFile(resultPath, "utf8"), /_No final textual result\._/);
+  assert.equal(extension.sent[0].message.details.result_path, undefined);
   assert.match(extension.sent[0].message.content, /_No final textual result\._/);
 });
 
@@ -1350,7 +1325,5 @@ export default function childProbe(pi) {
   assert.equal(extension.sent[0].message.customType, "subagent-completed");
   assert.match(extension.sent[0].message.content, /\{"started":true,"skill":true,"tool":true,"parent":true\}/);
   assert.equal(await readFile(shutdownMarker, "utf8"), "shutdown");
-  const resultPath = extension.sent[0].message.details.result_path;
-  t.after(() => rm(dirname(resultPath), { recursive: true, force: true }));
-  assert.match(await readFile(resultPath, "utf8"), /\{"started":true,"skill":true,"tool":true,"parent":true\}/);
+  assert.equal(extension.sent[0].message.details.result_path, undefined);
 });

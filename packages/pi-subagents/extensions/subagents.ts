@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { getSupportedThinkingLevels, StringEnum } from "@earendil-works/pi-ai";
@@ -91,11 +90,8 @@ interface ChildRecord {
   id: string;
   displayName: string;
   prompt: string;
-  profile: ModelProfile;
-  model: Model;
-  thinkingLevel: ThinkingLevel;
   state: ChildState;
-  finalization?: Promise<string>;
+  finalization?: Promise<void>;
   lastAssistant?: ChildMessage;
   unsubscribe?: () => void;
 }
@@ -155,7 +151,7 @@ async function createPiChildSession(options: ChildSessionOptions): Promise<Child
 }
 
 function childRolePrompt(parentPrompt: string): string {
-  return `${parentPrompt}\n\n# Fresh subagent role\n\nYou are a fresh subagent, not the parent agent. You have no parent conversation history. The parent remains authoritative and has delegated one narrow task to you.\n\nYou share the parent's working directory with concurrent work. Inspect current file contents before editing. Modify files only when the delegated task explicitly asks for implementation. Never revert unrelated changes. If current work conflicts with the delegated task, stop and report the conflict instead of forcing a resolution.\n\nUse message_parent with kind progress only for meaningful milestones, not routine tool activity. Use kind question when you must block for parent guidance.`;
+  return `${parentPrompt}\n\n# Fresh subagent role\n\nYou are a fresh subagent, not the parent agent. You have no parent conversation history. The parent remains authoritative and has delegated one narrow task to you.\n\nYou share the parent's working directory with concurrent work. Inspect current file contents before editing. Modify files only when the delegated task explicitly asks for implementation. Never revert unrelated changes. If current work conflicts with the delegated task, stop and report the conflict instead of forcing a resolution.\n\nYour final assistant message is delivered to the parent verbatim as your result, so make it a complete, self-contained deliverable. Produce files or other on-disk artifacts only when the delegated task asks for them.\n\nUse message_parent with kind progress only for meaningful milestones, not routine tool activity. Use kind question when you must block for parent guidance.`;
 }
 
 function delegatedTask(record: ChildRecord): string {
@@ -192,58 +188,6 @@ function naturalOutcome(assistant: ChildMessage | undefined): TerminalOutcome {
   return failed
     ? { status: "failed", error: assistant?.errorMessage ?? "Subagent failed." }
     : { status: "completed" };
-}
-
-function resultMarkdown(
-  record: ChildRecord,
-  status: TerminalStatus,
-  result: string,
-  error?: string,
-): string {
-  const resultSection =
-    status === "completed"
-      ? `## Result\n\n${result}`
-      : status === "failed"
-        ? `## Error\n\n${error ?? "Unknown error."}\n\n## Partial result\n\n${result}`
-        : `## Partial result\n\n${result}`;
-  return `# Subagent Result
-
-- ID: ${record.id}
-- Display name: ${record.displayName}
-- Status: ${status}
-- Model profile: ${record.profile}
-- Model: ${record.model.provider}/${record.model.id}
-- Thinking level: ${record.thinkingLevel}
-
-## Delegated task
-
-${record.prompt}
-
-${resultSection}
-`;
-}
-
-async function writeResult(
-  record: ChildRecord,
-  status: TerminalStatus,
-  result: string,
-  error?: string,
-): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "pi-subagent-"));
-  const pendingPath = join(directory, ".result.md.pending");
-  const resultPath = join(directory, "result.md");
-  await writeFile(pendingPath, resultMarkdown(record, status, result, error), {
-    encoding: "utf8",
-    mode: 0o600,
-    flag: "wx",
-  });
-  await rename(pendingPath, resultPath);
-  return resultPath;
-}
-
-function preview(result: string): string {
-  const characters = [...result];
-  return characters.length > 500 ? `${characters.slice(0, 500).join("")}…` : result;
 }
 
 function isActive(record: ChildRecord): boolean {
@@ -491,7 +435,7 @@ export function createSubagentsExtension({
       ctx: ExtensionContext,
       child: ChildSession | undefined,
       { status, error, abort = false }: TerminalOutcome,
-): Promise<string> | undefined => {
+): Promise<void> | undefined => {
       if (children.get(record.id) !== record || !isActive(record)) return undefined;
 
       const previousState = record.state;
@@ -510,16 +454,11 @@ export function createSubagentsExtension({
         }
         const assistant = record.lastAssistant ?? terminalAssistant(child?.messages ?? []);
         const result = assistantText(assistant);
-        let resultPath: string;
-        try {
-          resultPath = await writeResult(record, status, result, error);
-        } finally {
-          record.unsubscribe?.();
-          record.unsubscribe = undefined;
-          if (child) await disposeChild(child);
-          if (children.get(record.id) === record) children.delete(record.id);
-          updateStatus(ctx);
-        }
+        record.unsubscribe?.();
+        record.unsubscribe = undefined;
+        if (child) await disposeChild(child);
+        if (children.get(record.id) === record) children.delete(record.id);
+        updateStatus(ctx);
 
         if (status !== "killed") {
           deliverParentMessage(
@@ -532,16 +471,15 @@ export function createSubagentsExtension({
                   content:
                     `Subagent ${record.displayName} (${record.id}) ${status}.\n\n` +
                     (error ? `${error}\n\n` : "") +
-                    `${preview(result)}\n\nResult: ${resultPath}`,
+                    result,
                   display: true,
-                  details: { id: record.id, display_name: record.displayName, result_path: resultPath },
+                  details: { id: record.id, display_name: record.displayName },
                 },
                 { deliverAs: "followUp", triggerTurn: true },
               ),
             generation,
           );
         }
-        return resultPath;
       })();
       record.finalization = finalization;
       return finalization;
@@ -609,7 +547,7 @@ export function createSubagentsExtension({
       closeDelivery();
 
       const childCleanups: ChildSession[] = [];
-      const finalizations: Promise<string>[] = [];
+      const finalizations: Promise<void>[] = [];
       for (const record of children.values()) {
         const state = record.state;
         if (state.phase === "finalizing") {
@@ -709,7 +647,7 @@ export function createSubagentsExtension({
       name: "kill_subagent",
       label: "Kill Subagent",
       description:
-        "Cooperatively stop one active subagent by full UUID. This cannot force-stop synchronous code or extensions that ignore cancellation.",
+        "Cooperatively stop one active subagent by full UUID. This returns no result: no partial output and no artifact. To keep in-progress work, message the subagent to summarize and let it finish instead. This cannot force-stop synchronous code or extensions that ignore cancellation.",
       parameters: Type.Object({ id: Type.String() }),
       async execute(_toolCallId, { id }, _signal, _onUpdate, ctx) {
         ensureControlsOpen();
@@ -723,16 +661,16 @@ export function createSubagentsExtension({
         const child = state.phase === "starting" ? undefined : state.child;
         const finalization = claimFinalization(record, ctx, child, { status: "killed", abort: true });
         if (!finalization) throw new Error(`No active subagent with UUID ${id}.`);
-        const resultPath = await finalization;
+        await finalization;
 
         return {
           content: [
             {
               type: "text" as const,
-              text: `Cooperatively killed ${record.displayName} (${id}). Result: ${resultPath}`,
+              text: `Cooperatively killed ${record.displayName} (${id}).`,
             },
           ],
-          details: { id, display_name: record.displayName, result_path: resultPath },
+          details: { id, display_name: record.displayName },
         };
       },
     });
@@ -771,9 +709,6 @@ export function createSubagentsExtension({
           id: randomUUID(),
           displayName: display_name,
           prompt,
-          profile: resolvedProfile.profile,
-          model: resolvedProfile.model,
-          thinkingLevel: resolvedProfile.thinkingLevel,
           state: { phase: "starting", guidance: [] },
         };
         children.set(record.id, record);

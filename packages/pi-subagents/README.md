@@ -18,7 +18,7 @@ The repository manifest loads this extension automatically alongside the other p
 | --- | --- | --- |
 | `subagent` | `display_name`, `prompt`, optional `model_profile` | Starts a child in the background and immediately returns a full UUID. Call it by itself after other tool calls; a successful launch terminates the parent run. |
 | `message_subagent` | full `id`, `message` | Steers the addressed child, or answers its pending question. |
-| `kill_subagent` | full `id` | Cooperatively stops the addressed child and returns its result path. |
+| `kill_subagent` | full `id` | Cooperatively stops the addressed child and returns a bare acknowledgement (no result). |
 
 The UUID is the only control identifier. Display names are reusable labels, and short UUID prefixes are display-only. Do not modify a delegated scope while its UUID is active; send guidance or kill the child first.
 
@@ -57,9 +57,9 @@ Children receive a private `message_parent` tool:
 - `progress` reports a meaningful milestone without waking the parent or blocking the child. The report remains visible in future parent model context.
 - `question` wakes the parent and blocks the child until `message_subagent` answers it. One question may be pending per child, with no automatic timeout.
 
-Natural completion or failure writes a user-only temporary `result.md`, disposes the child, and wakes the parent once with a bounded preview and path. The file records the UUID, display name, status, selected profile, model, thinking level, delegated task, and visible terminal text; it excludes thinking, tool activity, communication messages, provider metadata, and the full transcript.
+Natural completion or failure disposes the child and wakes the parent once with the child's terminal text inlined directly in the message. The result is the visible terminal text verbatim (multiple text blocks preserved in order); it excludes thinking, tool activity, communication messages, provider metadata, and the full transcript. Failure additionally inlines the error, and an explicit placeholder is used when the child produced no terminal text. The result is not truncated and no file is written—if you need an on-disk artifact, tell the child to write one in the delegated prompt.
 
-Explicit kill also writes available partial text to `result.md`, but its tool result is the only acknowledgement—there is no second completion wake. Result files remain until operating-system temporary-file cleanup; there is no result polling tool.
+Explicit kill returns a bare acknowledgement: no partial text, no artifact, and no second completion wake. To keep in-progress work, message the child to summarize and let it complete naturally instead. There is no result-polling tool.
 
 ## Footer
 
