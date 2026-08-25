@@ -235,6 +235,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+// Raw ISO-8601 (UTC) instant for lifecycle messages so the parent can subtract two of them;
+// the extension emits raw wall-clock only and never computes elapsed time or deltas.
+function wallClock(): string {
+  return new Date().toISOString();
+}
+
 async function readConfig(agentDir: string, ctx: ExtensionContext): Promise<SubagentsConfig> {
   let source: string;
   try {
@@ -418,11 +424,12 @@ export function createSubagentsExtension({
               details: { ...details, answer: response },
             };
           }
+          const at = wallClock();
           const send = () =>
             pi.sendMessage(
               {
                 customType: "subagent-progress",
-                content: `Subagent ${record.displayName} (${record.id}) progress:\n\n${message}`,
+                content: `Subagent ${record.displayName} (${record.id}) progress at ${at}:\n\n${message}`,
                 display: true,
                 details,
               },
@@ -460,6 +467,7 @@ export function createSubagentsExtension({
       if (children.get(record.id) !== record || !isActive(record)) return undefined;
 
       const previousState = record.state;
+      const finishedAt = wallClock();
       record.state = { phase: "finalizing", child };
       writeLog(record, { kind: "outcome", status, error });
       if (status === "killed" && previousState.phase === "waiting") {
@@ -491,7 +499,7 @@ export function createSubagentsExtension({
                 {
                   customType: status === "completed" ? "subagent-completed" : "subagent-failed",
                   content:
-                    `Subagent ${record.displayName} (${record.id}) ${status}.\n\n` +
+                    `Subagent ${record.displayName} (${record.id}) ${status} at ${finishedAt}.\n\n` +
                     (error ? `${error}\n\n` : "") +
                     result,
                   display: true,
@@ -764,7 +772,7 @@ export function createSubagentsExtension({
             {
               type: "text" as const,
               text:
-                `Started ${record.displayName} (${record.id}). ` +
+                `Started ${record.displayName} (${record.id}) at ${wallClock()}. ` +
                 "It runs in the background; you will be woken when it finishes or needs an answer, " +
                 "so do not wait or poll — continue with unrelated work or end your turn." +
                 (model_profile === resolvedProfile.profile

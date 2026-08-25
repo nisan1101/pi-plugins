@@ -49,6 +49,9 @@ function stripTs(line) {
   return line.replace(/^\d{2}:\d{2}:\d{2} /, "");
 }
 
+// Matches an ISO 8601 wall-clock stamp; lifecycle messages embed the raw instant, no deltas.
+const ISO_TIMESTAMP = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z/;
+
 async function loadExtension(t, createChildSession, overrides = {}) {
   const agentDir = await mkdtemp(join(tmpdir(), "pi-subagents-test-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -201,6 +204,7 @@ test("launch returns distinct UUID handles without waiting for child startup", a
   assert.equal(first.terminate, undefined);
   assert.equal(second.terminate, undefined);
   assert.match(first.content[0].text, /woken when it finishes or needs an answer/i);
+  assert.match(first.content[0].text, ISO_TIMESTAMP);
   assert.equal(first.details.display_name, "research");
   assert.equal(second.details.display_name, "research");
   assert.match(first.details.id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
@@ -348,6 +352,7 @@ test("child progress reports identity without waking the parent or changing acti
   assert.match(extension.sent[0].message.content, new RegExp(launch.details.id));
   assert.match(extension.sent[0].message.content, /reporter/);
   assert.match(extension.sent[0].message.content, /Inspected every caller\./);
+  assert.match(extension.sent[0].message.content, ISO_TIMESTAMP);
 });
 
 // A blocking child question is answered directly without consuming Pi's existing steering queue.
@@ -739,6 +744,7 @@ test("natural completion inlines the result, disposes the child, and wakes the p
   assert.match(message.content, /finisher/);
   assert.match(message.content, new RegExp(launch.details.id));
   assert.match(message.content, /First result block\.\nSecond result block\./);
+  assert.match(message.content, ISO_TIMESTAMP);
   // Inlined result excludes hidden reasoning, tool activity, provider metadata, and the restated task.
   assert.doesNotMatch(message.content, /hidden reasoning|toolCall|secret|private-provider|Return the exact finding/);
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
@@ -833,6 +839,7 @@ test("natural failure inlines the error and partial text and wakes the parent on
   assert.deepEqual(options, { deliverAs: "followUp", triggerTurn: true });
   assert.match(message.content, /provider failed/);
   assert.match(message.content, /Available partial result\./);
+  assert.match(message.content, ISO_TIMESTAMP);
 
   // Failure inlines the error and partial text while excluding transcript and provider metadata.
   assert.doesNotMatch(message.content, /hidden reasoning|toolCall|secret|private-provider|private transcript/);
