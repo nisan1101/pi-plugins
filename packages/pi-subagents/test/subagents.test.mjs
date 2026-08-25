@@ -44,6 +44,11 @@ function assertCallsInAnyOrder(actual, expected) {
   assert.deepEqual([...actual].sort(), [...expected].sort());
 }
 
+// Drop the HH:MM:SS prefix so tests assert on log content, not the wall clock.
+function stripTs(line) {
+  return line.replace(/^\d{2}:\d{2}:\d{2} /, "");
+}
+
 async function loadExtension(t, createChildSession, overrides = {}) {
   const agentDir = await mkdtemp(join(tmpdir(), "pi-subagents-test-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -60,7 +65,19 @@ async function loadExtension(t, createChildSession, overrides = {}) {
   const sent = [];
   const handlers = new Map();
   let parentIdle = overrides.parentIdle ?? true;
-  createSubagentsExtension({ createChildSession })({
+  const logLines = new Map();
+  let logCleanups = 0;
+  const logBridge = overrides.logBridge ?? {
+    open(id) {
+      const lines = logLines.get(id) ?? [];
+      logLines.set(id, lines);
+      return { path: `/fake/${id}.log`, append: (line) => lines.push(line) };
+    },
+    cleanup() {
+      logCleanups += 1;
+    },
+  };
+  createSubagentsExtension({ createChildSession, logBridge })({
     on(event, handler) {
       const eventHandlers = handlers.get(event) ?? [];
       eventHandlers.push(handler);
@@ -120,6 +137,9 @@ async function loadExtension(t, createChildSession, overrides = {}) {
     statuses,
     warnings,
     sent,
+    logLines,
+    logOf: (id) => logLines.get(id) ?? [],
+    getLogCleanups: () => logCleanups,
     async emit(event, payload = {}) {
       for (const handler of handlers.get(event) ?? []) {
         await handler({ type: event, ...payload }, context);
@@ -1309,3 +1329,131 @@ export default function childProbe(pi) {
   assert.match(extension.sent[0].message.content, /\{"started":true,"skill":true,"tool":true,"parent":true\}/);
   assert.equal(await readFile(shutdownMarker, "utf8"), "shutdown");
 });
+
+// The log is written outside the TUI and captures assistant text and tool activity, never thinking.
+test("the log records tool activity and assistant text in a non-TUI mode", async (t) => {
+  let listener;
+  const run = deferred();
+  const child = fakeChild({
+    subscribe(next) {
+      listener = next;
+      return () => {};
+    },
+    async prompt() {
+      listener({ type: "tool_execution_start", toolName: "read" });
+      listener({ type: "tool_execution_end", toolName: "read", isError: false });
+      listener({ type: "tool_execution_end", toolName: "write", isError: true });
+      listener({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", thinking: "hidden reasoning" },
+            { type: "text", text: "Found the caller." },
+          ],
+        },
+      });
+      await run.promise;
+    },
+  });
+  const extension = await loadExtension(t, async () => child, { mode: "print" });
+  const launch = await extension.execute({ display_name: "logger", prompt: "Trace it." });
+  await waitFor(() => extension.logOf(launch.details.id).length >= 4);
+
+  const lines = extension.logOf(launch.details.id);
+  assert.deepEqual(lines.map(stripTs), [
+    "[tool] read",
+    "[tool ok] read",
+    "[tool err] write",
+    "Found the caller.",
+  ]);
+  assert.ok(lines.every((line) => /^\d{2}:\d{2}:\d{2} /.test(line)));
+  assert.ok(lines.every((line) => !/hidden reasoning/.test(line)));
+  run.resolve();
+});
+
+// Every parent-child exchange is recorded: progress, the question, the wait, and the answer.
+test("the log records the full parent exchange", async (t) => {
+  const promptStarted = deferred();
+  const run = deferred();
+  let creation;
+  const child = fakeChild({
+    async prompt() {
+      promptStarted.resolve();
+      await run.promise;
+    },
+  });
+  const extension = await loadExtension(
+    t,
+    async (options) => {
+      creation = options;
+      return child;
+    },
+    { parentIdle: false },
+  );
+  const launch = await extension.execute({ display_name: "asker", prompt: "Ask when unsure." });
+  await promptStarted.promise;
+
+  await callTool(creation.messageParentTool, { kind: "progress", message: "Halfway." });
+  const question = callTool(creation.messageParentTool, { kind: "question", message: "Which API?" });
+  await extension.message({ id: launch.details.id, message: "The public one." });
+  await question;
+
+  assert.deepEqual(extension.logOf(launch.details.id).map(stripTs), [
+    "[progress] Halfway.",
+    "[question] Which API?",
+    "[waiting for parent]",
+    "[answer] The public one.",
+  ]);
+  run.resolve();
+});
+
+// Natural completion records a completed outcome marker.
+test("the log records a completed outcome", async (t) => {
+  const child = fakeChild({
+    messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
+  });
+  const extension = await loadExtension(t, async () => child);
+
+  const launch = await extension.execute({ display_name: "finisher", prompt: "Finish." });
+  await waitFor(() => extension.sent.length === 1);
+
+  assert.ok(extension.logOf(launch.details.id).map(stripTs).includes("[completed]"));
+});
+
+// An explicit kill records a killed outcome marker through the kill finalization path.
+test("the log records a killed outcome", async (t) => {
+  const run = deferred();
+  const promptStarted = deferred();
+  const child = fakeChild({
+    async prompt() {
+      promptStarted.resolve();
+      await run.promise;
+    },
+    async abort() {
+      run.resolve();
+    },
+  });
+  const extension = await loadExtension(t, async () => child);
+
+  const launch = await extension.execute({ display_name: "victim", prompt: "Run until stopped." });
+  await promptStarted.promise;
+  await extension.kill({ id: launch.details.id });
+
+  assert.ok(extension.logOf(launch.details.id).map(stripTs).includes("[killed]"));
+});
+
+// The per-parent-process log directory is removed on the shutdown and tree-navigation cleanup paths.
+test("the log directory is cleaned on shutdown and on tree navigation", async (t) => {
+  const shutdown = await loadExtension(t, async () => fakeChild());
+  await shutdown.emit("session_shutdown", { reason: "quit" });
+  assert.equal(shutdown.getLogCleanups(), 1);
+
+  const tree = await loadExtension(t, async () => fakeChild());
+  await tree.emit("session_before_tree", {
+    preparation: { targetId: "target", oldLeafId: "old" },
+    signal: new AbortController().signal,
+  });
+  assert.equal(tree.getLogCleanups(), 1);
+});
+

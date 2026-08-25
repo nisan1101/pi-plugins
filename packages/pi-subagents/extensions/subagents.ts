@@ -17,6 +17,14 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import {
+  createFileLogBridge,
+  formatSubagentLog,
+  type SubagentLog,
+  type SubagentLogBridge,
+  type SubagentLogEvent,
+} from "./subagent-log.ts";
+
 const CONFIG_FILE = "subagents.json";
 const DEFAULT_MAX_CONCURRENT = 4;
 const ORCHESTRATION_TOOLS = ["subagent", "message_subagent", "kill_subagent"];
@@ -53,6 +61,8 @@ interface ChildMessage {
 interface ChildSessionEvent {
   type: string;
   message?: ChildMessage;
+  toolName?: string;
+  isError?: boolean;
 }
 
 interface ChildSession {
@@ -94,6 +104,7 @@ interface ChildRecord {
   finalization?: Promise<void>;
   lastAssistant?: ChildMessage;
   unsubscribe?: () => void;
+  log?: SubagentLog;
 }
 
 interface MessageParentDetails {
@@ -104,6 +115,7 @@ interface MessageParentDetails {
 
 interface SubagentsExtensionOptions {
   createChildSession?: CreateChildSession;
+  logBridge?: SubagentLogBridge;
 }
 
 async function createPiChildSession(options: ChildSessionOptions): Promise<ChildSession> {
@@ -306,9 +318,15 @@ function resolveProfile(
 
 export function createSubagentsExtension({
   createChildSession = createPiChildSession,
+  logBridge = createFileLogBridge(),
 }: SubagentsExtensionOptions = {}) {
   return function subagents(pi: ExtensionAPI) {
     const children = new Map<string, ChildRecord>();
+    const writeLog = (record: ChildRecord, event: SubagentLogEvent) => {
+      const log = record.log;
+      if (!log) return;
+      for (const line of formatSubagentLog(event, new Date())) log.append(line);
+    };
     let controlsOpen = true;
     let deliveryOpen = true;
     let deliveryGeneration = 0;
@@ -381,6 +399,8 @@ export function createSubagentsExtension({
               record.state = { phase: "waiting", child: state.child, resolve, reject };
             });
             updateStatus(ctx);
+            writeLog(record, { kind: "question", message });
+            writeLog(record, { kind: "waiting" });
             deliverParentMessage(ctx, true, () =>
               pi.sendMessage(
                 {
@@ -408,6 +428,7 @@ export function createSubagentsExtension({
               },
               { deliverAs: "followUp", triggerTurn: false },
             );
+          writeLog(record, { kind: "progress", message });
           deliverParentMessage(ctx, false, send);
           return {
             content: [{ type: "text" as const, text: "Progress reported to parent." }],
@@ -440,6 +461,7 @@ export function createSubagentsExtension({
 
       const previousState = record.state;
       record.state = { phase: "finalizing", child };
+      writeLog(record, { kind: "outcome", status, error });
       if (status === "killed" && previousState.phase === "waiting") {
         previousState.reject(new Error("Subagent was killed."));
       }
@@ -507,6 +529,13 @@ export function createSubagentsExtension({
           if (children.get(record.id) !== record) return;
           if (event.type === "message_end" && event.message?.role === "assistant") {
             record.lastAssistant = event.message;
+            writeLog(record, { kind: "assistant", content: event.message.content });
+          }
+          if (event.type === "tool_execution_start" && event.toolName) {
+            writeLog(record, { kind: "tool-start", tool: event.toolName });
+          }
+          if (event.type === "tool_execution_end" && event.toolName) {
+            writeLog(record, { kind: "tool-end", tool: event.toolName, ok: !event.isError });
           }
           if (event.type === "agent_settled" && isActive(record)) {
             void claimNaturalFinalization(record, ctx, child!)?.catch(() => {});
@@ -570,6 +599,7 @@ export function createSubagentsExtension({
         ...childCleanups.map((child) => disposeChild(child, { abort: true })),
         ...finalizations,
       ]);
+      logBridge.cleanup();
     };
 
     pi.on("session_shutdown", (_event, ctx) => cleanupOwnedChildren(ctx));
@@ -622,6 +652,7 @@ export function createSubagentsExtension({
         if (state.phase === "waiting") {
           record.state = { phase: "running", child: state.child };
           updateStatus(ctx);
+          writeLog(record, { kind: "answer", message });
           state.resolve(message);
           return {
             content: [{ type: "text" as const, text: `Answered ${record.displayName} (${id}).` }],
@@ -711,6 +742,7 @@ export function createSubagentsExtension({
           prompt,
           state: { phase: "starting", guidance: [] },
         };
+        record.log = logBridge.open(record.id);
         children.set(record.id, record);
         updateStatus(ctx);
 

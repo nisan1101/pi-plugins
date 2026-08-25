@@ -67,6 +67,13 @@ In TUI mode, active children appear in Pi's existing footer with a static themed
 
 The footer is optional presentation only. Launch, communication, results, and cleanup also work in RPC, JSON, and print modes.
 
+## Activity log
+
+From launch onward, each child appends a private plain-text activity log to `<tmpdir>/pi-subagents-<parentPid>/<uuid>.log`, in every run mode. Each line carries a short local `HH:MM:SS` prefix. The log records assistant text on message completion, tool activity (name plus success/failure) at tool-execution start and end, the parent exchange (progress, question, waiting-for-parent, answer), and the terminal outcome (completed / failed / killed). Thinking is never written.
+
+The file is created at launch and only ever appended, so you can follow a running child live—for example `tail -n +1 -F "<path>"`—and attaching later still shows prior history. The per-parent-process directory is removed on shutdown and `/tree` navigation cleanup.
+
+
 ## Lifecycle and limitations
 
 - `kill_subagent` is cooperative. Same-process synchronous code, or an extension that ignores cancellation, cannot be force-stopped.
