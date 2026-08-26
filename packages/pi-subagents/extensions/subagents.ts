@@ -742,7 +742,7 @@ export function createSubagentsExtension({
       name: "subagent",
       label: "Subagent",
       description:
-        "Launch one fresh background subagent for a narrow delegated task. You are woken automatically when it finishes or asks a question. It shares your working directory, so don't edit the files it's working on until it finishes.",
+        "Launch one fresh background subagent for a narrow delegated task. It wakes you itself when it finishes or asks a question, so you don't need to schedule a wake or poll for it. It shares your working directory, so don't edit the files it's working on until it finishes.",
       parameters: Type.Object({
         display_name: Type.String({ minLength: 1 }),
         prompt: Type.String({ minLength: 1 }),
@@ -798,8 +798,8 @@ export function createSubagentsExtension({
               type: "text" as const,
               text:
                 `Started ${record.displayName} (${record.id}) at ${wallClock()}. ` +
-                "It runs in the background; you will be woken when it finishes or needs an answer, " +
-                "so do not wait or poll — continue with unrelated work or end your turn." +
+                "It runs in the background and wakes you itself when it finishes or needs an answer — " +
+                "you don't need to schedule a wake or check back. Continue with unrelated work or end your turn." +
                 (model_profile === resolvedProfile.profile
                   ? ""
                   : ` Model profile ${model_profile} is not configured; using inherit.`),
