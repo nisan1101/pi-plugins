@@ -68,10 +68,11 @@ export default function scheduledWake(pi: ExtensionAPI) {
   pi.registerTool({
     name: "schedule_wake",
     label: "Schedule Wake",
-    description: "Schedule a future agent wake to check asynchronous work.",
-    promptSnippet: "Schedule a future turn to check asynchronous or long-running work",
+    description:
+      "Schedule a future turn to re-check external work you must poll — a process-manager job, CI, or a remote condition like Kubernetes pod readiness. Use it only when nothing else will wake you.",
+    promptSnippet: "Schedule a future turn to re-check external state you must poll (a job, CI, a remote condition)",
     promptGuidelines: [
-      "Use schedule_wake between checks of long-running local jobs or remote state such as Kubernetes pod readiness or CI completion.",
+      "Use schedule_wake between checks of long-running local jobs or remote state you must poll, such as Kubernetes pod readiness or CI completion; reach for it only when nothing else will wake you.",
       "Before schedule_wake for a local job, use zmx when available (`zmx run <session> -d <command...>`); otherwise use another process manager. Include its session or job name in the reason; avoid unmanaged raw `&` or `nohup`.",
       "The schedule_wake reason must name the target, status check, and actions for pending or completed states. A wake is only a check: reschedule if pending. Call schedule_wake by itself after all other tool calls finish; Pi ends the run only when every tool result in that batch is terminating.",
     ],
