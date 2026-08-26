@@ -1,8 +1,8 @@
 {
-  "name": "pi-scheduled-wake",
-  "version": "0.1.0",
-  "description": "Pi extension that schedules a future agent wake while external systems own ongoing work.",
-  "keywords": ["pi-package", "pi-extension", "scheduled-wake", "zmx"],
+  "name": "pi-timer",
+  "version": "0.2.0",
+  "description": "Pi extension that sets a timer for a later agent turn while external systems own ongoing work.",
+  "keywords": ["pi-package", "pi-extension", "timer", "zmx"],
   "license": "UNLICENSED",
   "private": true,
   "type": "module",

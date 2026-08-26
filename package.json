@@ -3,9 +3,13 @@
   "private": true,
   "description": "Pi extensions installed directly from GitHub.",
   "keywords": ["pi-package"],
+  "scripts": {
+    "test": "npm --prefix packages/pi-ask-web test && npm --prefix packages/pi-subagents test && npm --prefix packages/pi-timer test",
+    "typecheck": "npm --prefix packages/pi-ask-web run typecheck && npm --prefix packages/pi-subagents run typecheck && npm --prefix packages/pi-timer run typecheck"
+  },
   "pi": {
     "extensions": [
-      "./packages/pi-scheduled-wake/extensions/scheduled-wake.ts",
+      "./packages/pi-timer/extensions/timer.ts",
       "./packages/pi-qq/extensions/qq.ts",
       "./packages/pi-subagents/extensions/subagents.ts",
       "./packages/pi-ask-web/extensions/ask-web.ts"
