@@ -1,0 +1,27 @@
+{
+  "name": "pi-ask-web",
+  "version": "0.1.0",
+  "description": "Consult a remote web librarian for current, source-backed answers through Pi's OpenAI Codex login.",
+  "keywords": ["pi-package", "pi-extension", "web-search", "ask-web"],
+  "license": "UNLICENSED",
+  "private": true,
+  "type": "module",
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.84.2",
+    "@earendil-works/pi-coding-agent": "0.84.2",
+    "typebox": "1.3.7",
+    "typescript": "^5.9.3"
+  }
+}

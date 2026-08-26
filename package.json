@@ -7,7 +7,8 @@
     "extensions": [
       "./packages/pi-scheduled-wake/extensions/scheduled-wake.ts",
       "./packages/pi-qq/extensions/qq.ts",
-      "./packages/pi-subagents/extensions/subagents.ts"
+      "./packages/pi-subagents/extensions/subagents.ts",
+      "./packages/pi-ask-web/extensions/ask-web.ts"
     ]
   }
 }
