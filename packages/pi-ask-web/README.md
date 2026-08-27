@@ -49,7 +49,7 @@ not authoritative raw citation metadata.
 
 `ask_web` uses your Pi OpenAI Codex login. If you are not logged in, the tool
 returns an instruction to run Pi's OpenAI Codex login. It requires the
-`gpt-5.6-terra` model and fails clearly (without falling back to another tier) when
+`gpt-5.6-luna` model and fails clearly (without falling back to another tier) when
 it is unavailable.
 
 ## Development

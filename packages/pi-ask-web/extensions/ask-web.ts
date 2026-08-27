@@ -4,9 +4,9 @@ import { Type } from "typebox";
 
 const TOOL_NAME = "ask_web";
 const PROVIDER = "openai-codex";
-// ponytail: pinned Terra model. Generalize to newest-Terra ranking when a second Terra tier ships.
-const TERRA_MODEL_ID = "gpt-5.6-terra";
-const REQUEST_TIMEOUT_MS = 60_000;
+// ponytail: pinned Luna model. Generalize to newest-Luna ranking when a second Luna tier ships.
+const LUNA_MODEL_ID = "gpt-5.6-luna";
+const REQUEST_TIMEOUT_MS = 120_000;
 const MAX_DOMAINS = 20;
 
 const DEPTH_TO_CONTEXT_SIZE = {
@@ -119,10 +119,10 @@ export default function askWeb(pi: ExtensionAPI): void {
 
       const model = ctx.modelRegistry
         .getAll()
-        .find((candidate) => candidate.provider === PROVIDER && candidate.id === TERRA_MODEL_ID);
+        .find((candidate) => candidate.provider === PROVIDER && candidate.id === LUNA_MODEL_ID);
       if (!model) {
         throw new Error(
-          `ask_web requires the OpenAI Codex ${TERRA_MODEL_ID} model, which is not available in your catalog.`,
+          `ask_web requires the OpenAI Codex ${LUNA_MODEL_ID} model, which is not available in your catalog.`,
         );
       }
 
