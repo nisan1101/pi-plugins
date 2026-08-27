@@ -1,31 +1,40 @@
-# Issue tracker: Local Markdown
+# Issue tracker: GitHub
 
-Issues and specs for this repo live as Markdown files in `.scratch/`.
+Issues and specs for this repository live in GitHub Issues at
+https://github.com/nisan1101/pi-plugins/issues. Use the `gh` CLI for all
+operations.
 
 ## Conventions
 
-- One feature per directory: `.scratch/<feature-slug>/`
-- The spec is `.scratch/<feature-slug>/spec.md`
-- Implementation issues are one file per ticket at `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`
-- Comments and conversation history append under a `## Comments` heading
+- Run `gh` inside this repository so it infers `nisan1101/pi-plugins`.
+- Create: `gh issue create --title "..." --body-file <file>`
+- Read: `gh issue view <number> --json body,labels,comments`
+- List: `gh issue list --state open`
+- Comment: `gh issue comment <number> --body-file <file>`
+- Apply or remove labels with `gh issue edit`.
+- Close with `gh issue close`.
+
+Use temporary body files for multiline issue and comment bodies.
+
+## Pull requests as a triage surface
+
+**PRs as a request surface: no.**
 
 ## When a skill says "publish to the issue tracker"
 
-Create a new file under `.scratch/<feature-slug>/`, creating the directory if needed.
+Create a GitHub issue in `nisan1101/pi-plugins`.
 
 ## When a skill says "fetch the relevant ticket"
 
-Read the referenced file. The user will normally pass its path or issue number directly.
+Run `gh issue view <number> --comments`.
 
 ## Wayfinding operations
 
-The map is a file with one child file per ticket.
+The map is one GitHub issue with child issues as tickets.
 
-- Map: `.scratch/<effort>/map.md`
-- Child ticket: `.scratch/<effort>/issues/NN-<slug>.md`
-- A `Type:` line records `research`, `prototype`, `grilling`, or `task`
-- A `Status:` line records `claimed` or `resolved`
-- `Blocked by: NN, NN` records dependencies
-- The frontier is the first open, unblocked, unclaimed ticket by number
-- Claim by setting `Status: claimed`
-- Resolve by appending an `## Answer`, setting `Status: resolved`, and adding a context pointer to the map
+- Use GitHub sub-issues when available.
+- Represent blocking relationships with GitHub’s native issue dependencies.
+- If native relationships are unavailable, record `Blocked by: #<number>` in
+  the child issue body.
+- Claim work by assigning the issue to the driving developer.
+- Resolve work by posting the answer and closing the issue.

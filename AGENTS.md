@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues and specs are tracked as local Markdown under `.scratch/<feature-slug>/`. See `docs/agents/issue-tracker.md`.
+Issues and specs are tracked in GitHub Issues for `nisan1101/pi-plugins`. See `docs/agents/issue-tracker.md`.
 
 ### Domain docs
 
