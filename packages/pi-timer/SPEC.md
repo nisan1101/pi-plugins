@@ -10,6 +10,8 @@ The work and the timer have different lifecycles. A process manager owns local b
 
 Pi shutdown, reload, session replacement, crashes, or power loss can destroy an in-memory timer or queued follow-up before its timer message reaches the agent. The resumed session must report those interrupted timers with the next user prompt without reviving their timers or triggering an unsolicited turn.
 
+Committed `/tree` navigation changes the active branch without replacing the runtime session. A timer left active across that transition can wake the destination branch even when its history does not contain the scheduling checkpoint, while the abandoned source branch retains stale pending metadata.
+
 ## Solution
 
 Provide a project-local Pi extension with one model-callable capability: set a timer for a relative delay.
@@ -21,6 +23,8 @@ When the timer expires, the extension injects a visible custom timer message int
 A timer is advisory: it means “inspect the target’s current state,” not “the work has completed.” If the local job or remote condition is still pending, the agent sets another timer. If it has completed, the agent inspects and reports the result.
 
 Each scheduling and delivery transition persists a complete pending-timer snapshot in the session. On session start, the extension reads the newest branch-local snapshot. Any unresolved timers are summarized in one visible interruption message that joins model context but does not trigger a turn; the message records an empty snapshot to prevent duplicate notices.
+
+Tree navigation is a cancellation boundary. Before Pi changes the leaf, the extension stops every runtime timer and appends an empty snapshot to the source branch. After Pi commits the destination, the extension reads that branch’s newest snapshot; unresolved timers are summarized in one visible tree-cancellation message that does not trigger a turn and records an empty snapshot. A destination with no unresolved timer metadata receives no message.
 
 ## User Stories
 
@@ -57,6 +61,8 @@ Each scheduling and delivery transition persists a complete pending-timer snapsh
 31. As an extension maintainer, I want to rely on Pi’s agent-run serialization, so that the extension never starts or coordinates concurrent model loops itself.
 32. As an extension maintainer, I want the model-facing interface to remain limited to setting a timer, so that timer listing, explicit cancellation, process inspection, and job registries remain deferred until demonstrated needs arise.
 33. As a user, I want timers to revisit remote asynchronous conditions such as Kubernetes pod readiness, so that the feature is useful even when no local process exists.
+34. As a user, I expect `/tree` navigation to cancel runtime timers from the branch I leave, so that they cannot wake unrelated history.
+35. As a user, I want a destination that still records a cancelled timer to receive a visible non-triggering cancellation message, so that branch history never promises a wake that cannot occur.
 
 ## Implementation Decisions
 
@@ -86,6 +92,10 @@ Each scheduling and delivery transition persists a complete pending-timer snapsh
 - The chosen process manager is the sole owner and source of truth for local background process lifecycle, status, logs, interaction, cancellation, and cleanup. Remote systems remain the source of truth for their own asynchronous state.
 - The extension never starts, tracks, polls, signals, or kills a process and never interprets a process-manager session or job identifier.
 - Runtime timer lifecycle is session-scoped. Session shutdown clears all timer handles and runtime timer records without writing an empty checkpoint, preventing callbacks while preserving evidence of unresolved timers.
+- Committed tree navigation is also a runtime cancellation boundary. In `session_before_tree`, clear every timer handle and runtime record; when at least one timer was live, append an empty complete snapshot while the source branch is still active.
+- In `session_tree`, scan backward from the committed destination leaf using the same branch-local marker rules as session startup. If unresolved metadata exists, append one visible tree-cancellation message with turn triggering disabled; its details record the cancelled IDs and an empty pending snapshot.
+- A destination branch with no unresolved metadata remains a no-op, so source-only timer reasons do not leak into unrelated sibling context.
+- Pi SDK `0.84.2` has no non-cancellable pre-commit tree hook or tree-failure event. If a later extension vetoes navigation or summarization fails after Timer handles `session_before_tree`, the timers remain cancelled on the unchanged source branch and no destination cancellation message is emitted.
 - Timer handles remain ephemeral and are never restored. Serializable pending-timer metadata persists only in Pi’s session history so a resumed session can report interruption.
 - On session start, walk backward from the active leaf through indexed parent lookups and stop at the newest valid state checkpoint or interruption message. Do not construct the complete branch.
 - Skip malformed markers rather than failing session startup.
@@ -113,6 +123,11 @@ Each scheduling and delivery transition persists a complete pending-timer snapsh
 - Verify that recovery stays on the active branch, stops at the newest valid marker, and safely skips malformed state.
 - Verify that session shutdown prevents every pending timer from emitting a timer message.
 - Verify that shutdown remains safe when no timers are pending and when called more than once.
+- Verify that rewinding before a timer’s scheduling checkpoint clears its handle and runtime record, writes an empty source snapshot before the leaf changes, and cannot wake the destination.
+- Verify that switching to a sibling branch without the timer checkpoint cancels the source timer without injecting source details into the sibling.
+- Verify that navigating to history containing a pending checkpoint appends one visible tree-cancellation message with turn triggering disabled and an empty terminal snapshot.
+- Verify that returning to or resuming the closed source branch does not report the cancelled timer as interrupted.
+- Verify that tree navigation with no live or persisted timers appends no entries and emits no messages.
 - Verify rejection of zero, negative, non-finite, and runtime-unsupported delays.
 - Verify rejection of an empty reason.
 - Do not re-test Pi’s internal follow-up ordering or model-run serialization. At the extension seam, verify that the timer message requests `triggerTurn` and follow-up delivery; Pi’s documented message-delivery contract owns idle and active-run routing.

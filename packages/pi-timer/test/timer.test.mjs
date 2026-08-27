@@ -66,6 +66,23 @@ function loadExtension(sessionManager = createSessionManager()) {
     sessionManager.append({ type: "custom_message", ...message });
   };
 
+  const emit = async (event, data = {}) => {
+    assert.ok(handlers[event]);
+    await handlers[event]({ type: event, ...data }, { sessionManager });
+  };
+
+  const navigateTree = async (targetId) => {
+    const oldLeafId = sessionManager.getLeafEntry()?.id ?? null;
+    await emit("session_before_tree", {
+      preparation: { targetId, oldLeafId },
+      signal: new AbortController().signal,
+    });
+    const sourceLeaf = sessionManager.getLeafEntry();
+    sessionManager.setLeaf(targetId);
+    await emit("session_tree", { newLeafId: targetId, oldLeafId });
+    return { oldLeafId, sourceLeaf };
+  };
+
   return {
     tool,
     shutdown: handlers.session_shutdown,
@@ -73,6 +90,7 @@ function loadExtension(sessionManager = createSessionManager()) {
     sent,
     sessionManager,
     deliver,
+    navigateTree,
   };
 }
 
@@ -116,6 +134,98 @@ test("a fired timer remains recoverable until its message is delivered", async (
   const resumed = loadExtension(sessionManager);
   await resumed.sessionStart({ type: "session_start", reason: "resume" }, { sessionManager });
   assert.equal(resumed.sent.length, 0);
+});
+
+// Rewinding before a timer's checkpoint closes the source branch and cannot wake the destination.
+test("rewinding before scheduling cancels the timer and closes the source branch", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const sessionManager = createSessionManager();
+  const beforeScheduling = sessionManager.append({ type: "message", message: { role: "assistant" } });
+  const active = loadExtension(sessionManager);
+
+  await active.tool.execute("call-1", { seconds: 1, reason: "Check the build." });
+  const scheduledCheckpoint = sessionManager.getLeafEntry();
+  const { sourceLeaf: sourceClosure } = await active.navigateTree(beforeScheduling.id);
+  assert.equal(sourceClosure.parentId, scheduledCheckpoint.id);
+  assert.deepEqual(sourceClosure.data.pending, []);
+
+  t.mock.timers.tick(1_000);
+  assert.equal(active.sent.length, 0);
+
+  sessionManager.setLeaf(sourceClosure.id);
+  const resumed = loadExtension(sessionManager);
+  await resumed.sessionStart({ type: "session_start", reason: "resume" }, { sessionManager });
+  assert.equal(resumed.sent.length, 0);
+});
+
+// A destination that still contains the scheduled timer learns that tree navigation cancelled it.
+test("navigating to history after scheduling reports the cancelled timer", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const sessionManager = createSessionManager();
+  sessionManager.append({ type: "message", message: { role: "assistant" } });
+  const active = loadExtension(sessionManager);
+
+  await active.tool.execute("call-1", { seconds: 1, reason: "Check the build." });
+  const scheduledCheckpoint = sessionManager.getLeafEntry();
+  const destination = sessionManager.append({ type: "message", message: { role: "assistant" } });
+  sessionManager.append({ type: "message", message: { role: "assistant" } });
+
+  await active.navigateTree(destination.id);
+
+  assert.equal(active.sent.length, 1);
+  const [{ message, options }] = active.sent;
+  assert.equal(message.customType, "timer-cancelled");
+  assert.match(message.content, /tree navigation.*cancelled/i);
+  assert.match(message.content, /Check the build\..*scheduled for/s);
+  assert.deepEqual(message.details, { cancelledTimerIds: ["call-1"], pending: [] });
+  assert.deepEqual(options, { triggerTurn: false });
+  assert.deepEqual(sessionManager.getLeafEntry().details.pending, []);
+
+  t.mock.timers.tick(1_000);
+  assert.equal(active.sent.length, 1);
+
+  const resumed = loadExtension(sessionManager);
+  await resumed.sessionStart({ type: "session_start", reason: "resume" }, { sessionManager });
+  assert.equal(resumed.sent.length, 0);
+});
+
+// Switching to a sibling without the timer checkpoint closes the source without leaking a notice.
+test("switching to a sibling cancels the source timer without waking the sibling", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const sessionManager = createSessionManager();
+  const base = sessionManager.append({ type: "message", message: { role: "assistant" } });
+  const sibling = sessionManager.append({ type: "message", message: { role: "assistant" } });
+  sessionManager.setLeaf(base.id);
+  const active = loadExtension(sessionManager);
+
+  await active.tool.execute("call-1", { seconds: 1, reason: "Check the source build." });
+  const scheduledCheckpoint = sessionManager.getLeafEntry();
+  const { sourceLeaf: sourceClosure } = await active.navigateTree(sibling.id);
+
+  t.mock.timers.tick(1_000);
+
+  assert.equal(active.sent.length, 0);
+  assert.equal(sourceClosure.parentId, scheduledCheckpoint.id);
+  assert.deepEqual(sourceClosure.data.pending, []);
+
+  sessionManager.setLeaf(sourceClosure.id);
+  const resumed = loadExtension(sessionManager);
+  await resumed.sessionStart({ type: "session_start", reason: "resume" }, { sessionManager });
+  assert.equal(resumed.sent.length, 0);
+});
+
+// Tree navigation with no live or persisted timers leaves session history unchanged.
+test("tree navigation without timers is a no-op", async () => {
+  const sessionManager = createSessionManager();
+  const destination = sessionManager.append({ type: "message", message: { role: "assistant" } });
+  sessionManager.append({ type: "message", message: { role: "assistant" } });
+  const active = loadExtension(sessionManager);
+  const entriesBefore = sessionManager.getEntries();
+
+  await active.navigateTree(destination.id);
+
+  assert.deepEqual(sessionManager.getEntries(), entriesBefore);
+  assert.equal(active.sent.length, 0);
 });
 
 test("resuming reports every interrupted timer without starting a turn", async (t) => {

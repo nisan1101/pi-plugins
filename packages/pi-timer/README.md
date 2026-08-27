@@ -12,7 +12,13 @@ The extension manages timers and session-local interruption metadata only. Use `
 - **Advisory, not completion-driven** — a timer tells the agent to inspect current local or remote state; it does not claim the work finished.
 - **Does not restore timers** — runtime timers stop with their Pi session and are never rearmed after resume.
 - **Reports interrupted timers** — unresolved timer metadata persists in the session; the next prompt after resume tells the agent which checks were interrupted without starting a turn automatically.
+- **Cancels on tree navigation** — committed `/tree` navigation stops every runtime timer and closes the source branch with an empty checkpoint.
+- **Explains branch-local cancellation** — if the destination branch still records pending timers, one visible message reports their cancellation without starting an agent turn.
 - **Process-agnostic** — the extension never starts, polls, or kills background processes.
+
+## Tree-navigation limitation
+
+Pi SDK `0.84.2` has no non-cancellable pre-commit tree hook. If a later extension vetoes navigation, or branch summarization fails after Timer handles `session_before_tree`, the timers remain cancelled on the unchanged source branch and no destination cancellation message is emitted.
 
 ## Agent workflow
 

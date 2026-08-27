@@ -65,6 +65,29 @@ export default function timer(pi: ExtensionAPI) {
       pending: [...pendingTimers.values()].map(({ pending }) => pending),
     });
   };
+
+  const reportCancelledTimers = (cancelled: PendingTimer[], cause: string) => {
+    if (cancelled.length === 0) return;
+
+    const summary = cancelled
+      .map(({ reason, dueAt }) => `- ${reason} (scheduled for ${new Date(dueAt).toISOString()})`)
+      .join("\n");
+    pi.sendMessage(
+      {
+        customType: TIMER_CANCELLED_TYPE,
+        content:
+          `${cause} ` +
+          "These timers will not be restored; the underlying local jobs or remote targets were not inspected, stopped, or changed.\n\n" +
+          summary,
+        display: true,
+        details: {
+          cancelledTimerIds: cancelled.map(({ timerId }) => timerId),
+          pending: [],
+        },
+      },
+      { triggerTurn: false },
+    );
+  };
   pi.registerTool({
     name: "set_timer",
     label: "Set Timer",
@@ -113,26 +136,24 @@ export default function timer(pi: ExtensionAPI) {
   });
 
   pi.on("session_start", (_event, { sessionManager }) => {
-    const interrupted = findPendingTimers(sessionManager);
-    if (interrupted.length === 0) return;
+    reportCancelledTimers(
+      findPendingTimers(sessionManager),
+      "Timers from a previous Pi process were interrupted before their messages reached the agent.",
+    );
+  });
 
-    const summary = interrupted
-      .map(({ reason, dueAt }) => `- ${reason} (scheduled for ${new Date(dueAt).toISOString()})`)
-      .join("\n");
-    pi.sendMessage(
-      {
-        customType: TIMER_CANCELLED_TYPE,
-        content:
-          "Timers from a previous Pi process were interrupted before their messages reached the agent. " +
-          "These timers will not be restored; the underlying local jobs or remote targets were not inspected, stopped, or changed.\n\n" +
-          summary,
-        display: true,
-        details: {
-          cancelledTimerIds: interrupted.map(({ timerId }) => timerId),
-          pending: [],
-        },
-      },
-      { triggerTurn: false },
+  pi.on("session_before_tree", () => {
+    if (pendingTimers.size === 0) return;
+
+    for (const { timeout } of pendingTimers.values()) clearTimeout(timeout);
+    pendingTimers.clear();
+    persistPendingTimers();
+  });
+
+  pi.on("session_tree", (_event, { sessionManager }) => {
+    reportCancelledTimers(
+      findPendingTimers(sessionManager),
+      "Tree navigation cancelled timers recorded on this branch before their messages reached the agent.",
     );
   });
 
