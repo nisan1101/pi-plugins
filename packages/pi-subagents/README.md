@@ -17,7 +17,7 @@ The repository manifest loads this extension automatically alongside the other p
 | Tool | Parameters | Behavior |
 | --- | --- | --- |
 | `subagent` | `display_name`, `prompt`, optional `model_profile` | Starts a child in the background and immediately returns a full UUID. Launch does not force the parent run to end: the parent is woken automatically when the child finishes or asks a question, so there is no need to call `set_timer` or poll for it. The parent can keep working on unrelated scope or end its turn. |
-| `message_subagent` | full `id`, `message` | Steers the addressed child, or answers its pending question. |
+| `message_subagent` | full `id`, `message` | Steers the addressed child after its current tool-call batch, or answers its pending question directly. |
 | `kill_subagent` | full `id` | Cooperatively stops the addressed child and returns a bare acknowledgement (no result). |
 
 The UUID is the only control identifier. Display names are reusable labels, and short UUID prefixes are display-only. Do not modify a delegated scope while its UUID is active; send guidance or kill the child first.
@@ -54,10 +54,12 @@ Configuration is global at `$PI_CODING_AGENT_DIR/subagents.json`, which defaults
 
 Children receive a private `message_parent` tool:
 
-- `progress` reports a meaningful milestone without waking the parent or blocking the child. The report remains visible in future parent model context.
-- `question` wakes the parent and blocks the child until `message_subagent` answers it. One question may be pending per child, with no automatic timeout.
+- `progress` reports a meaningful milestone without waking the parent or blocking the child. It is recorded immediately. If the parent is busy, the report does not enter that run's already-captured model context; it remains available to future parent turns.
+- `question` blocks the child until `message_subagent` answers it. If the parent is busy, the question is queued as steering after the parent's current tool-call batch and before its next model call. If the parent is idle, it starts a turn immediately. One question may be pending per child, with no automatic timeout.
 
-Natural completion or failure disposes the child and wakes the parent once with the child's terminal text inlined directly in the message. The result is the visible terminal text verbatim (multiple text blocks preserved in order); it excludes thinking, tool activity, communication messages, provider metadata, and the full transcript. Failure additionally inlines the error, and an explicit placeholder is used when the child produced no terminal text. The result is not truncated and no file is written—if you need an on-disk artifact, tell the child to write one in the delegated prompt.
+Parent guidance follows the same safe boundary in the other direction: `message_subagent` steers a running child after its current tool-call batch and before its next model call. An answer to a pending question instead completes the child's blocked `message_parent` tool call directly. Neither direction aborts an in-flight tool.
+
+Natural completion or failure releases the child's active slot and queues the parent notification exactly once before finishing session cleanup, so slow cleanup cannot delay the actionable boundary. The notification inlines the child's terminal text directly. The result is the visible terminal text verbatim (multiple text blocks preserved in order); it excludes thinking, tool activity, communication messages, provider metadata, and the full transcript. Failure additionally inlines the error, and an explicit placeholder is used when the child produced no terminal text. The result is not truncated and no file is written—if you need an on-disk artifact, tell the child to write one in the delegated prompt.
 
 Explicit kill returns a bare acknowledgement: no partial text, no artifact, and no second completion wake. To keep in-progress work, message the child to summarize and let it complete naturally instead. There is no result-polling tool.
 

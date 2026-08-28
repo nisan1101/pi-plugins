@@ -333,8 +333,8 @@ test("parent messages buffer during startup and steer only the addressed running
   );
 });
 
-// Child progress is visible parent context, never a parent tool, and never wakes either agent.
-test("child progress reports identity without waking the parent or changing activity status", async (t) => {
+// Busy-parent progress is recorded immediately without waking or steering the parent.
+test("child progress reaches a busy parent immediately without waking either agent", async (t) => {
   const run = deferred();
   const child = fakeChild({
     async prompt() {
@@ -363,11 +363,8 @@ test("child progress reports identity without waking the parent or changing acti
 
   assert.match(result.content[0].text, /reported/i);
   assert.deepEqual(extension.statuses.at(-1), status);
-  assert.equal(extension.sent.length, 0);
-  extension.setIdle(true);
-  await extension.emit("agent_settled");
   assert.equal(extension.sent.length, 1);
-  assert.deepEqual(extension.sent[0].options, { deliverAs: "followUp", triggerTurn: false });
+  assert.deepEqual(extension.sent[0].options, { triggerTurn: false });
   assert.equal(extension.sent[0].message.customType, "subagent-progress");
   assert.equal(extension.sent[0].message.details.id, launch.details.id);
   assert.equal(extension.sent[0].message.details.display_name, "reporter");
@@ -377,8 +374,29 @@ test("child progress reports identity without waking the parent or changing acti
   assert.match(extension.sent[0].message.content, ISO_TIMESTAMP);
 });
 
-// A blocking child question is answered directly without consuming Pi's existing steering queue.
-test("parent answer resolves one waiting question and later messages resume steering", async (t) => {
+// Idle-parent progress is recorded without starting a parent turn.
+test("child progress reaches an idle parent without waking it", async (t) => {
+  const run = deferred();
+  let creation;
+  const extension = await loadExtension(
+    t,
+    async (options) => {
+      creation = options;
+      return fakeChild({ async prompt() { await run.promise; } });
+    },
+  );
+  await extension.execute({ display_name: "idle-reporter", prompt: "Report without waking." });
+  await waitFor(() => creation !== undefined);
+
+  await callTool(creation.messageParentTool, { kind: "progress", message: "Milestone reached." });
+
+  assert.equal(extension.sent.length, 1);
+  assert.equal(extension.sent[0].message.customType, "subagent-progress");
+  assert.deepEqual(extension.sent[0].options, { triggerTurn: false });
+});
+
+// A blocking question reaches a busy parent immediately and its direct answer resumes the child.
+test("blocking question steers a busy parent without waiting for settlement", async (t) => {
   const promptStarted = deferred();
   const run = deferred();
   const steered = [];
@@ -406,7 +424,9 @@ test("parent answer resolves one waiting question and later messages resume stee
   await extension.message({ id: launch.details.id, message: "Queued before the question." });
   await callTool(creation.messageParentTool, { kind: "progress", message: "Progress before question." });
 
-  t.mock.timers.enable({ apis: ["setTimeout"] });
+  assert.equal(extension.sent.length, 1);
+  assert.equal(extension.sent[0].message.customType, "subagent-progress");
+
   let questionSettled = false;
   const question = callTool(creation.messageParentTool, {
     kind: "question",
@@ -414,13 +434,8 @@ test("parent answer resolves one waiting question and later messages resume stee
   }).finally(() => {
     questionSettled = true;
   });
-  assert.equal(extension.sent.length, 0);
-  extension.setIdle(true);
-  await extension.emit("agent_settled");
-  assert.equal(extension.sent.length, 2);
-  t.mock.timers.tick(2_147_483_647);
-  await Promise.resolve();
 
+  assert.equal(extension.sent.length, 2);
   assert.equal(questionSettled, false);
   assert.match(extension.statuses.at(-1).text, /^<warning>\?<\/warning> asker#[0-9a-f]{8}$/i);
   assert.deepEqual(
@@ -428,7 +443,7 @@ test("parent answer resolves one waiting question and later messages resume stee
     ["subagent-progress", "subagent-question"],
   );
   const questionNotice = extension.sent[1];
-  assert.deepEqual(questionNotice.options, { deliverAs: "followUp", triggerTurn: true });
+  assert.deepEqual(questionNotice.options, { deliverAs: "steer", triggerTurn: true });
   assert.equal(questionNotice.message.details.id, launch.details.id);
   assert.equal(questionNotice.message.details.display_name, "asker");
   assert.match(questionNotice.message.content, /Which API should I preserve\?/);
@@ -505,6 +520,7 @@ test("kill aborts a waiting child and returns a bare acknowledgement", async (t)
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
   assert.equal(extension.sent.length, 1);
   assert.equal(extension.sent[0].message.customType, "subagent-question");
+  assert.deepEqual(extension.sent[0].options, { deliverAs: "steer", triggerTurn: true });
   await assert.rejects(extension.kill({ id: launch.details.id }), /no active subagent/i);
   await assert.rejects(extension.message({ id: launch.details.id, message: "Too late." }), /no active subagent/i);
 });
@@ -727,7 +743,7 @@ async function waitFor(predicate) {
   assert.fail("Timed out waiting for background subagent work.");
 }
 
-// Successful completion inlines one focused result only after child disposal.
+// Successful completion queues one focused result and finishes child disposal.
 test("natural completion inlines the result, disposes the child, and wakes the parent once", async (t) => {
   const lifecycle = [];
   const child = fakeChild({
@@ -755,6 +771,7 @@ test("natural completion inlines the result, disposes the child, and wakes the p
 
   const launch = await extension.execute({ display_name: "finisher", prompt: "Return the exact finding." });
   await waitFor(() => extension.sent.length === 1);
+  await waitFor(() => lifecycle.length === 2);
 
   assertCallsInAnyOrder(lifecycle, ["shutdown", "dispose"]);
   assert.equal(extension.sent.length, 1);
@@ -762,7 +779,7 @@ test("natural completion inlines the result, disposes the child, and wakes the p
   assert.equal(message.customType, "subagent-completed");
   assert.equal(message.details.id, launch.details.id);
   assert.equal(message.details.display_name, "finisher");
-  assert.deepEqual(options, { deliverAs: "followUp", triggerTurn: true });
+  assert.deepEqual(options, { deliverAs: "steer", triggerTurn: true });
   assert.match(message.content, /finisher/);
   assert.match(message.content, new RegExp(launch.details.id));
   assert.match(message.content, /First result block\.\nSecond result block\./);
@@ -774,6 +791,24 @@ test("natural completion inlines the result, disposes the child, and wakes the p
     extension.message({ id: launch.details.id, message: "Too late." }),
     /no active subagent/i,
   );
+});
+
+// A natural completion steers a busy parent without waiting for settlement or cleanup.
+test("natural completion steers a busy parent without an agent_settled event", async (t) => {
+  const child = fakeChild({
+    messages: [{ role: "assistant", content: [{ type: "text", text: "Focused result." }] }],
+  });
+  const extension = await loadExtension(t, async () => child, { parentIdle: false });
+
+  const launch = await extension.execute({ display_name: "busy-finisher", prompt: "Finish while busy." });
+  await waitFor(() => extension.statuses.at(-1)?.text === undefined);
+
+  assert.equal(extension.sent.length, 1);
+  const [{ message, options }] = extension.sent;
+  assert.equal(message.customType, "subagent-completed");
+  assert.equal(message.details.id, launch.details.id);
+  assert.match(message.content, /Focused result\./);
+  assert.deepEqual(options, { deliverAs: "steer", triggerTurn: true });
 });
 
 // The full terminal text is inlined verbatim, past the old bounded-preview boundary.
@@ -851,6 +886,7 @@ test("natural failure inlines the error and partial text and wakes the parent on
 
   const launch = await extension.execute({ display_name: "failing", prompt: "Try the provider." });
   await waitFor(() => extension.sent.length === 1);
+  await waitFor(() => lifecycle.length === 2);
 
   assertCallsInAnyOrder(lifecycle, ["shutdown", "dispose"]);
   assert.equal(extension.sent.length, 1);
@@ -858,7 +894,7 @@ test("natural failure inlines the error and partial text and wakes the parent on
   assert.equal(message.customType, "subagent-failed");
   assert.equal(message.details.id, launch.details.id);
   assert.equal(message.details.display_name, "failing");
-  assert.deepEqual(options, { deliverAs: "followUp", triggerTurn: true });
+  assert.deepEqual(options, { deliverAs: "steer", triggerTurn: true });
   assert.match(message.content, /provider failed/);
   assert.match(message.content, /Available partial result\./);
   assert.match(message.content, ISO_TIMESTAMP);
@@ -867,10 +903,37 @@ test("natural failure inlines the error and partial text and wakes the parent on
   assert.doesNotMatch(message.content, /hidden reasoning|toolCall|secret|private-provider|private transcript/);
 });
 
-// Once terminal finalization begins, the UUID stops accepting controls and leaves active status.
-test("completion wins kill and releases its slot before disposal", async (t) => {
+// A natural failure steers a busy parent with its error and visible partial result.
+test("natural failure steers a busy parent without an agent_settled event", async (t) => {
+  const child = fakeChild({
+    messages: [
+      {
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "provider failed while busy",
+        content: [{ type: "text", text: "Visible partial result." }],
+      },
+    ],
+  });
+  const extension = await loadExtension(t, async () => child, { parentIdle: false });
+
+  const launch = await extension.execute({ display_name: "busy-failure", prompt: "Fail while busy." });
+  await waitFor(() => extension.statuses.at(-1)?.text === undefined);
+
+  assert.equal(extension.sent.length, 1);
+  const [{ message, options }] = extension.sent;
+  assert.equal(message.customType, "subagent-failed");
+  assert.equal(message.details.id, launch.details.id);
+  assert.match(message.content, /provider failed while busy/);
+  assert.match(message.content, /Visible partial result\./);
+  assert.deepEqual(options, { deliverAs: "steer", triggerTurn: true });
+});
+
+// Terminal finalization notifies immediately, releases its slot, and continues cleanup once.
+test("completion notifies and releases its slot before disposal finishes", async (t) => {
   const shutdownStarted = deferred();
   const allowShutdown = deferred();
+  const disposalFinished = deferred();
   const steered = [];
   const child = fakeChild({
     messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }],
@@ -881,6 +944,9 @@ test("completion wins kill and releases its slot before disposal", async (t) => 
       shutdownStarted.resolve();
       await allowShutdown.promise;
     },
+    dispose() {
+      disposalFinished.resolve();
+    },
   });
   const replacementStartup = deferred();
   let creations = 0;
@@ -888,6 +954,9 @@ test("completion wins kill and releases its slot before disposal", async (t) => 
   await writeFile(join(extension.agentDir, "subagents.json"), JSON.stringify({ maxConcurrent: 1 }));
   const launch = await extension.execute({ display_name: "finalizer", prompt: "Finish." });
   await shutdownStarted.promise;
+  assert.equal(extension.sent.length, 1);
+  assert.equal(extension.sent[0].message.customType, "subagent-completed");
+  assert.deepEqual(extension.sent[0].options, { deliverAs: "steer", triggerTurn: true });
 
   await assert.rejects(
     extension.message({ id: launch.details.id, message: "Too late." }),
@@ -901,7 +970,7 @@ test("completion wins kill and releases its slot before disposal", async (t) => 
   assert.notEqual(replacement.details.id, launch.details.id);
 
   allowShutdown.resolve();
-  await waitFor(() => extension.sent.length === 1);
+  await disposalFinished.promise;
 });
 
 // The terminal event claims completion before the prompt promise yields back to orchestration.
@@ -975,12 +1044,12 @@ test("startup failure disposes a child that cannot rediscover every active work 
   assert.match(extension.sent[0].message.content, /missing-tool/);
   assert.match(extension.sent[0].message.content, new RegExp(launch.details.id));
   assert.match(extension.sent[0].message.content, /could not load active tools: write/i);
-  assert.deepEqual(extension.sent[0].options, { deliverAs: "followUp", triggerTurn: true });
+  assert.deepEqual(extension.sent[0].options, { deliverAs: "steer", triggerTurn: true });
   assert.match(extension.sent[0].message.content, /_No final textual result\._/);
 });
 
-// Parent lifecycle cleanup closes delivery before aborting every owned child and is idempotent.
-test("session shutdown silently cancels active, waiting, starting, and finalizing children", async (t) => {
+// Parent lifecycle cleanup preserves delivered notices, closes future delivery, and cleans every child.
+test("session shutdown suppresses only late child notifications", async (t) => {
   const runs = [deferred(), deferred()];
   const starts = [deferred(), deferred()];
   const lifecycle = [[], [], [], []];
@@ -1007,7 +1076,7 @@ test("session shutdown silently cancels active, waiting, starting, and finalizin
   const finalShutdownStarted = deferred();
   const allowFinalShutdown = deferred();
   const finalizingChild = fakeChild({
-    messages: [{ role: "assistant", content: [{ type: "text", text: "Should stay unpublished." }] }],
+    messages: [{ role: "assistant", content: [{ type: "text", text: "Published before cleanup." }] }],
     async shutdown() {
       lifecycle[2].push("shutdown");
       finalShutdownStarted.resolve();
@@ -1054,7 +1123,10 @@ test("session shutdown silently cancels active, waiting, starting, and finalizin
   await extension.execute({ display_name: "finalizing", prompt: "Finish now." });
   await finalShutdownStarted.promise;
   await extension.execute({ display_name: "starting", prompt: "Still starting." });
-  assert.equal(extension.sent.length, 0);
+  assert.deepEqual(
+    extension.sent.map(({ message }) => message.customType),
+    ["subagent-progress", "subagent-question", "subagent-completed"],
+  );
 
   const shutdown = extension.emit("session_shutdown", { reason: "reload" });
   await waitFor(() => extension.statuses.at(-1)?.text === undefined);
@@ -1082,7 +1154,10 @@ test("session shutdown silently cancels active, waiting, starting, and finalizin
   assertCallsInAnyOrder(lifecycle[1], ["abort", "shutdown", "dispose"]);
   assertCallsInAnyOrder(lifecycle[2], ["shutdown", "dispose"]);
   assertCallsInAnyOrder(lifecycle[3], ["abort", "shutdown", "dispose"]);
-  assert.equal(extension.sent.length, 0);
+  assert.deepEqual(
+    extension.sent.map(({ message }) => message.customType),
+    ["subagent-progress", "subagent-question", "subagent-completed"],
+  );
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
 });
 
@@ -1139,15 +1214,18 @@ test("tree navigation closes the old timeline and reopens controls after one can
   await questionRejected;
   await beforeTree;
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
-  assert.equal(extension.sent.length, 0);
+  assert.deepEqual(
+    extension.sent.map(({ message }) => message.customType),
+    ["subagent-question"],
+  );
   await assert.rejects(
     callTool(creations[0].messageParentTool, { kind: "progress", message: "Late old-branch progress." }),
     /no longer available/i,
   );
 
   await extension.emit("session_tree", { newLeafId: "new", oldLeafId: "old" });
-  assert.equal(extension.sent.length, 1);
-  const [{ message, options }] = extension.sent;
+  assert.equal(extension.sent.length, 2);
+  const { message, options } = extension.sent[1];
   assert.equal(message.customType, "subagents-tree-cancelled");
   assert.deepEqual(options, { deliverAs: "followUp", triggerTurn: false });
   assert.match(message.content, new RegExp(`first#${first.details.id.slice(0, 8)}`));

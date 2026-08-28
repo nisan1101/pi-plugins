@@ -363,37 +363,12 @@ export function createSubagentsExtension({
     let deliveryOpen = true;
     let deliveryGeneration = 0;
     let treeStoppedHandles: string[] = [];
-    // Pi bypasses its follow-up queue when triggerTurn is false, so preserve order until the parent settles.
-    const pendingParentMessages: Array<{ generation: number; wakesParent: boolean; send(): void }> = [];
-    const flushParentMessages = () => {
-      if (!deliveryOpen) {
-        pendingParentMessages.length = 0;
-        return;
-      }
-      while (pendingParentMessages.length > 0) {
-        const next = pendingParentMessages.shift()!;
-        if (next.generation !== deliveryGeneration) continue;
-        next.send();
-        if (next.wakesParent) return;
-      }
+    const deliverProgressParentMessage = (send: () => void) => {
+      if (deliveryOpen) send();
     };
-    const deliverParentMessage = (
-      ctx: ExtensionContext,
-      wakesParent: boolean,
-      send: () => void,
-      generation = deliveryGeneration,
-) => {
-      if (!deliveryOpen || generation !== deliveryGeneration) return;
-      const guardedSend = () => {
-        if (deliveryOpen && generation === deliveryGeneration) send();
-      };
-      if (ctx.isIdle() && pendingParentMessages.length === 0) guardedSend();
-      else {
-        pendingParentMessages.push({ generation, wakesParent, send: guardedSend });
-        if (ctx.isIdle()) flushParentMessages();
-      }
+    const deliverActionableParentMessage = (send: () => void, generation = deliveryGeneration) => {
+      if (deliveryOpen && generation === deliveryGeneration) send();
     };
-    pi.on("agent_settled", flushParentMessages);
 
     const updateStatus = (ctx: ExtensionContext) => {
       if (ctx.mode === "tui") ctx.ui.setStatus("subagents", renderStatus(children.values(), ctx.ui.theme));
@@ -402,7 +377,6 @@ export function createSubagentsExtension({
     const closeDelivery = () => {
       deliveryOpen = false;
       deliveryGeneration += 1;
-      pendingParentMessages.length = 0;
     };
 
     const ensureControlsOpen = () => {
@@ -433,7 +407,7 @@ export function createSubagentsExtension({
             updateStatus(ctx);
             writeLog(record, { kind: "question", message });
             writeLog(record, { kind: "waiting" });
-            deliverParentMessage(ctx, true, () =>
+            deliverActionableParentMessage(() =>
               pi.sendMessage(
                 {
                   customType: "subagent-question",
@@ -441,7 +415,7 @@ export function createSubagentsExtension({
                   display: true,
                   details,
                 },
-                { deliverAs: "followUp", triggerTurn: true },
+                { deliverAs: "steer", triggerTurn: true },
               ),
             );
             const response = await answer;
@@ -459,10 +433,10 @@ export function createSubagentsExtension({
                 display: true,
                 details,
               },
-              { deliverAs: "followUp", triggerTurn: false },
+              { triggerTurn: false },
             );
           writeLog(record, { kind: "progress", message });
-          deliverParentMessage(ctx, false, send);
+          deliverProgressParentMessage(send);
           return {
             content: [{ type: "text" as const, text: "Progress reported to parent." }],
             details,
@@ -503,23 +477,13 @@ export function createSubagentsExtension({
       const generation = deliveryGeneration;
 
       const finalization = (async () => {
-        if (child && abort) {
-          try {
-            await child.abort();
-          } catch {}
-        }
         const assistant = record.lastAssistant ?? terminalAssistant(child?.messages ?? []);
         const result = assistantText(assistant);
         record.unsubscribe?.();
         record.unsubscribe = undefined;
-        if (child) await disposeChild(child);
-        if (children.get(record.id) === record) children.delete(record.id);
-        updateStatus(ctx);
 
         if (status !== "killed") {
-          deliverParentMessage(
-            ctx,
-            true,
+          deliverActionableParentMessage(
             () =>
               pi.sendMessage(
                 {
@@ -531,11 +495,20 @@ export function createSubagentsExtension({
                   display: true,
                   details: { id: record.id, display_name: record.displayName },
                 },
-                { deliverAs: "followUp", triggerTurn: true },
+                { deliverAs: "steer", triggerTurn: true },
               ),
             generation,
           );
         }
+
+        if (child && abort) {
+          try {
+            await child.abort();
+          } catch {}
+        }
+        if (child) await disposeChild(child);
+        if (children.get(record.id) === record) children.delete(record.id);
+        updateStatus(ctx);
       })();
       record.finalization = finalization;
       return finalization;
