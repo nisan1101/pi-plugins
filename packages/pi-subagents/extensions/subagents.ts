@@ -108,6 +108,7 @@ interface ChildRecord {
   displayName: string;
   prompt: string;
   state: ChildState;
+  childReady?: Promise<ChildSession>;
   finalization?: Promise<void>;
   lastAssistant?: ChildMessage;
   unsubscribe?: () => void;
@@ -444,12 +445,16 @@ export function createSubagentsExtension({
         },
       });
 
-    const disposeChild = async (child: ChildSession, { abort = false }: { abort?: boolean } = {}) => {
-      if (abort) {
-        try {
-          await child.abort();
-        } catch {}
+    const abortChild = (child: ChildSession): Promise<void> => {
+      try {
+        return child.abort().catch(() => {});
+      } catch {
+        return Promise.resolve();
       }
+    };
+
+    const disposeChild = async (child: ChildSession, { abort = false }: { abort?: boolean } = {}) => {
+      if (abort) await abortChild(child);
       try {
         await child.shutdown();
       } catch {}
@@ -463,7 +468,7 @@ export function createSubagentsExtension({
       ctx: ExtensionContext,
       child: ChildSession | undefined,
       { status, error, abort = false }: TerminalOutcome,
-): Promise<void> | undefined => {
+    ): Promise<void> | undefined => {
       if (children.get(record.id) !== record || !isActive(record)) return undefined;
 
       const previousState = record.state;
@@ -475,14 +480,31 @@ export function createSubagentsExtension({
       }
       updateStatus(ctx);
       const generation = deliveryGeneration;
+      const immediateAbort = status === "killed" && child && abort ? abortChild(child) : undefined;
 
       const finalization = (async () => {
-        const assistant = record.lastAssistant ?? terminalAssistant(child?.messages ?? []);
-        const result = assistantText(assistant);
-        record.unsubscribe?.();
+        let ownedChild = child;
+        if (!ownedChild && status === "killed" && record.childReady) {
+          try {
+            ownedChild = await record.childReady;
+          } catch {
+            return;
+          }
+        }
+
+        const killAbort =
+          immediateAbort ??
+          (status === "killed" && ownedChild && abort ? abortChild(ownedChild) : undefined);
+        if (killAbort) await killAbort;
+
+        try {
+          record.unsubscribe?.();
+        } catch {}
         record.unsubscribe = undefined;
 
         if (status !== "killed") {
+          const assistant = record.lastAssistant ?? terminalAssistant(ownedChild?.messages ?? []);
+          const result = assistantText(assistant);
           deliverActionableParentMessage(
             () =>
               pi.sendMessage(
@@ -501,15 +523,12 @@ export function createSubagentsExtension({
           );
         }
 
-        if (child && abort) {
-          try {
-            await child.abort();
-          } catch {}
-        }
-        if (child) await disposeChild(child);
+        if (status !== "killed" && ownedChild && abort) await abortChild(ownedChild);
+        if (ownedChild) await disposeChild(ownedChild);
+      })().finally(() => {
         if (children.get(record.id) === record) children.delete(record.id);
         updateStatus(ctx);
-      })();
+      });
       record.finalization = finalization;
       return finalization;
     };
@@ -526,9 +545,11 @@ export function createSubagentsExtension({
       let child: ChildSession | undefined;
       let promptStarted = false;
       try {
-        child = await createChildSession(options);
+        const childReady = createChildSession(options);
+        record.childReady = childReady;
+        child = await childReady;
         if (children.get(record.id) !== record || !isActive(record)) {
-          await disposeChild(child, { abort: true });
+          if (!record.finalization) await disposeChild(child, { abort: true });
           return;
         }
 
@@ -683,7 +704,7 @@ export function createSubagentsExtension({
       name: "kill_subagent",
       label: "Kill Subagent",
       description:
-        "Cooperatively stop one active subagent by full UUID. This returns no result: no partial output and no artifact. To keep in-progress work, message the subagent to summarize and let it finish instead. This cannot force-stop synchronous code or extensions that ignore cancellation.",
+        "Immediately claim one active subagent as killed by full UUID. Cancellation is signaled first when a child session exists; shutdown and disposal continue in the background. This returns no result: no partial output and no artifact. To keep in-progress work, message the subagent to summarize and let it finish instead. This cannot force-stop synchronous code or extensions that ignore cancellation.",
       parameters: Type.Object({ id: Type.String() }),
       async execute(_toolCallId, { id }, _signal, _onUpdate, ctx) {
         ensureControlsOpen();
@@ -697,7 +718,7 @@ export function createSubagentsExtension({
         const child = state.phase === "starting" ? undefined : state.child;
         const finalization = claimFinalization(record, ctx, child, { status: "killed", abort: true });
         if (!finalization) throw new Error(`No active subagent with UUID ${id}.`);
-        await finalization;
+        void finalization.catch(() => {});
 
         return {
           content: [

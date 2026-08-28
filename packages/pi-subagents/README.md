@@ -18,7 +18,7 @@ The repository manifest loads this extension automatically alongside the other p
 | --- | --- | --- |
 | `subagent` | `display_name`, `prompt`, optional `model_profile` | Starts a child in the background and immediately returns a full UUID. Launch does not force the parent run to end: the parent is woken automatically when the child finishes or asks a question, so there is no need to call `set_timer` or poll for it. The parent can keep working on unrelated scope or end its turn. |
 | `message_subagent` | full `id`, `message` | Steers the addressed child after its current tool-call batch, or answers its pending question directly. |
-| `kill_subagent` | full `id` | Cooperatively stops the addressed child and returns a bare acknowledgement (no result). |
+| `kill_subagent` | full `id` | Signals cooperative cancellation and immediately acknowledges the child as killed (no result); shutdown and disposal continue in the background. |
 
 The UUID is the only control identifier. Display names are reusable labels, and short UUID prefixes are display-only. Do not modify a delegated scope while its UUID is active; send guidance or kill the child first.
 
@@ -61,7 +61,7 @@ Parent guidance follows the same safe boundary in the other direction: `message_
 
 Natural completion or failure releases the child's active slot and queues the parent notification exactly once before finishing session cleanup, so slow cleanup cannot delay the actionable boundary. The notification inlines the child's terminal text directly. The result is the visible terminal text verbatim (multiple text blocks preserved in order); it excludes thinking, tool activity, communication messages, provider metadata, and the full transcript. Failure additionally inlines the error, and an explicit placeholder is used when the child produced no terminal text. The result is not truncated and no file is written—if you need an on-disk artifact, tell the child to write one in the delegated prompt.
 
-Explicit kill returns a bare acknowledgement: no partial text, no artifact, and no second completion wake. To keep in-progress work, message the child to summarize and let it complete naturally instead. There is no result-polling tool.
+Explicit kill claims the killed outcome and releases any pending child question immediately. For an instantiated child, cancellation is signalled before the bare acknowledgement returns; for a child still starting, it is signalled as soon as construction finishes. Abort, shutdown, and disposal then continue through the same exactly-once cleanup path in the background. The acknowledgement contains no partial text or artifact, and the child sends no later completion wake. To keep in-progress work, message the child to summarize and let it complete naturally instead. There is no result-polling tool.
 
 ## Footer
 

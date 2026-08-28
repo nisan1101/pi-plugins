@@ -102,6 +102,7 @@ async function loadExtension(t, createChildSession, overrides = {}) {
     },
     sendMessage(message, options) {
       sent.push({ message, options });
+      overrides.onSend?.(message, options);
     },
   });
 
@@ -466,6 +467,96 @@ test("blocking question steers a busy parent without waiting for settlement", as
   assert.deepEqual(steered, ["Queued before the question.", "Continue."]);
 });
 
+// Kill confirms after signaling cancellation, without waiting for abort, shutdown, or disposal.
+test("kill confirms while terminal cleanup remains unfinished", async (t) => {
+  const promptStarted = deferred();
+  const run = deferred();
+  const abortStarted = deferred();
+  const allowAbort = deferred();
+  const shutdownStarted = deferred();
+  const allowShutdown = deferred();
+  const disposalFinished = deferred();
+  let disposed = false;
+  let creation;
+  let listener;
+  const child = fakeChild({
+    subscribe(next) {
+      listener = next;
+      return () => {};
+    },
+    async prompt() {
+      promptStarted.resolve();
+      await run.promise;
+    },
+    async abort() {
+      abortStarted.resolve();
+      await allowAbort.promise;
+      run.resolve();
+    },
+    async shutdown() {
+      shutdownStarted.resolve();
+      await allowShutdown.promise;
+    },
+    dispose() {
+      disposed = true;
+      disposalFinished.resolve();
+    },
+  });
+  const extension = await loadExtension(t, async (options) => {
+    creation = options;
+    return child;
+  });
+  const launch = await extension.execute({ display_name: "immediate", prompt: "Keep working." });
+  await promptStarted.promise;
+
+  let confirmed = false;
+  const killing = extension.kill({ id: launch.details.id }).then((result) => {
+    confirmed = true;
+    return result;
+  });
+  await abortStarted.promise;
+  await Promise.resolve();
+
+  try {
+    assert.equal(confirmed, true);
+    const killed = await killing;
+    assert.match(killed.content[0].text, /^Cooperatively killed immediate \([0-9a-f-]{36}\)\.$/);
+    assert.equal(disposed, false);
+    await assert.rejects(extension.kill({ id: launch.details.id }), /no active subagent/i);
+    await assert.rejects(
+      extension.message({ id: launch.details.id, message: "Too late." }),
+      /no active subagent/i,
+    );
+    await assert.rejects(
+      callTool(creation.messageParentTool, { kind: "progress", message: "Late progress." }),
+      /no longer available/i,
+    );
+    await assert.rejects(
+      callTool(creation.messageParentTool, { kind: "question", message: "Late question?" }),
+      /no longer available/i,
+    );
+    listener({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "Late partial result." }] },
+    });
+    listener({ type: "agent_settled" });
+    assert.equal(extension.sent.length, 0);
+    assert.deepEqual(
+      extension
+        .logOf(launch.details.id)
+        .map(stripTs)
+        .filter((line) => /^\[(?:completed|failed|killed)\]/.test(line)),
+      ["[killed]"],
+    );
+  } finally {
+    allowAbort.resolve();
+    await shutdownStarted.promise;
+    assert.equal(disposed, false);
+    allowShutdown.resolve();
+    await disposalFinished.promise;
+  }
+});
+
 // Explicit kill acknowledges with no result, rejects a blocked question, and never sends a second wake.
 test("kill aborts a waiting child and returns a bare acknowledgement", async (t) => {
   const run = deferred();
@@ -554,15 +645,15 @@ test("kill wins a simultaneous natural failure without duplicate cleanup or noti
   await promptStarted.promise;
 
   const killed = await extension.kill({ id: launch.details.id });
-  await Promise.resolve();
+  await waitFor(() => lifecycle.includes("dispose"));
 
   assertCallsInAnyOrder(lifecycle, ["abort", "shutdown", "dispose"]);
   assert.equal(extension.sent.length, 0);
   assert.match(killed.content[0].text, /^Cooperatively killed racer \([0-9a-f-]{36}\)\.$/);
 });
 
-// Killing during construction returns immediately and disposes the child if startup later finishes.
-test("kill claims a starting child and late startup is cleaned silently", async (t) => {
+// A killed starting child stays owned until its eventual cleanup finishes.
+test("parent shutdown joins cleanup for a killed starting child", async (t) => {
   const startup = deferred();
   const lifecycle = [];
   const child = fakeChild({
@@ -584,8 +675,19 @@ test("kill claims a starting child and late startup is cleaned silently", async 
   assert.deepEqual(lifecycle, []);
   assert.equal(extension.sent.length, 0);
 
-  startup.resolve(child);
-  await waitFor(() => lifecycle.includes("dispose"));
+  let shutdownFinished = false;
+  const parentShutdown = extension.emit("session_shutdown", { reason: "quit" }).then(() => {
+    shutdownFinished = true;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  try {
+    assert.equal(shutdownFinished, false);
+  } finally {
+    startup.resolve(child);
+    await parentShutdown;
+  }
+
   assertCallsInAnyOrder(lifecycle, ["abort", "shutdown", "dispose"]);
   assert.equal(extension.sent.length, 0);
 });
@@ -929,6 +1031,40 @@ test("natural failure steers a busy parent without an agent_settled event", asyn
   assert.deepEqual(options, { deliverAs: "steer", triggerTurn: true });
 });
 
+// A prompt failure preserves notification-before-cleanup ordering outside explicit kill.
+test("prompt failure notifies before cooperative abort", async (t) => {
+  const allowAbort = deferred();
+  const disposalFinished = deferred();
+  const timeline = [];
+  const child = fakeChild({
+    async prompt() {
+      throw new Error("prompt failed");
+    },
+    async abort() {
+      timeline.push("abort");
+      await allowAbort.promise;
+    },
+    dispose() {
+      disposalFinished.resolve();
+    },
+  });
+  const extension = await loadExtension(t, async () => child, {
+    onSend() {
+      timeline.push("notify");
+    },
+  });
+
+  await extension.execute({ display_name: "prompt-failure", prompt: "Fail naturally." });
+  await waitFor(() => timeline.length === 2);
+
+  try {
+    assert.deepEqual(timeline, ["notify", "abort"]);
+  } finally {
+    allowAbort.resolve();
+    await disposalFinished.promise;
+  }
+});
+
 // Terminal finalization notifies immediately, releases its slot, and continues cleanup once.
 test("completion notifies and releases its slot before disposal finishes", async (t) => {
   const shutdownStarted = deferred();
@@ -1011,6 +1147,20 @@ test("terminal completion event beats a later kill call", async (t) => {
   allowPromptReturn.resolve();
 
   assert.match(extension.sent[0].message.content, /Event won\./);
+});
+
+// A child-session construction error remains a visible natural failure.
+test("child construction failure notifies the parent", async (t) => {
+  const extension = await loadExtension(t, async () => {
+    throw new Error("construction failed");
+  });
+
+  const launch = await extension.execute({ display_name: "unbuilt", prompt: "Try to start." });
+  await waitFor(() => extension.sent.length === 1);
+
+  assert.equal(extension.sent[0].message.customType, "subagent-failed");
+  assert.match(extension.sent[0].message.content, /construction failed/);
+  assert.match(extension.sent[0].message.content, new RegExp(launch.details.id));
 });
 
 // Configuration-equivalent inheritance fails visibly instead of silently dropping a parent work tool.
