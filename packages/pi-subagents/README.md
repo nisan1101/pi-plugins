@@ -16,7 +16,7 @@ The repository manifest loads this extension automatically alongside the other p
 
 | Tool | Parameters | Behavior |
 | --- | --- | --- |
-| `subagent` | `display_name`, `prompt`, optional `model_profile` | Starts a child in the background and immediately returns a full UUID. Launch does not force the parent run to end: the parent is woken automatically when the child finishes or asks a question, so there is no need to call `set_timer` or poll for it. The parent can keep working on unrelated scope or end its turn. |
+| `subagent` | `display_name`, `prompt`, optional `model_profile` | Starts a child in the background and immediately returns a full UUID. Pi wakes the parent automatically when the child completes, fails, or asks a blocking question, so the parent may end its turn right after launch or keep working on unrelated scope. Do not wait with a Bash `sleep`, `set_timer`, or status poll. |
 | `message_subagent` | full `id`, `message` | Steers the addressed child after its current tool-call batch, or answers its pending question directly. |
 | `kill_subagent` | full `id` | Signals cooperative cancellation and immediately acknowledges the child as killed (no result); shutdown and disposal continue in the background. |
 

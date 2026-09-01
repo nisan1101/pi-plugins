@@ -226,7 +226,7 @@ test("launch returns distinct UUID handles without waiting for child startup", a
   // Launch no longer forces termination; the parent decides whether to keep working.
   assert.equal(first.terminate, undefined);
   assert.equal(second.terminate, undefined);
-  assert.match(first.content[0].text, /wakes you itself when it finishes or needs an answer/i);
+  assert.match(first.content[0].text, /wakes you automatically when it completes, fails, or asks a blocking question/i);
   assert.match(first.content[0].text, ISO_TIMESTAMP);
   assert.equal(first.details.display_name, "research");
   assert.equal(second.details.display_name, "research");
