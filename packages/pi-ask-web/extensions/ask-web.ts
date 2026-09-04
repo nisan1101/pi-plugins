@@ -1,5 +1,6 @@
 import type { TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 const TOOL_NAME = "ask_web";
@@ -102,6 +103,14 @@ export default function askWeb(pi: ExtensionAPI): void {
         }),
       ),
     }),
+
+    renderCall(args, theme) {
+      let text = theme.fg("toolTitle", theme.bold("Ask Web"));
+      if (args.question) {
+        text += `\n${theme.fg("muted", args.question)}`;
+      }
+      return new Text(text, 0, 0);
+    },
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx: ExtensionContext) {
       const question = params.question.trim();

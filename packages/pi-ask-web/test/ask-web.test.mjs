@@ -114,6 +114,21 @@ test("exposes a self-contained question, optional depth, and optional domains", 
   assert.deepEqual([...tool.parameters.required], ["question"]);
 });
 
+// The tool-call renderer surfaces the agent's question in Pi's transcript.
+test("renders the web question in the tool call", () => {
+  const tool = loadTool();
+  const theme = {
+    bold: (text) => text,
+    fg: (_color, text) => text,
+  };
+
+  const component = tool.renderCall({ question: "What changed in the latest release?" }, theme, {});
+  assert.deepEqual(component.render(100).map((line) => line.trimEnd()), [
+    "Ask Web",
+    "What changed in the latest release?",
+  ]);
+});
+
 // Empty scope is rejected before any capability resolution or network work.
 test("whitespace-only question fails before model selection or network", async () => {
   const tool = loadTool();
