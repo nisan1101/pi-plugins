@@ -63,6 +63,7 @@ async function loadExtension(t, createChildSession, overrides = {}) {
   });
 
   const tools = new Map();
+  const messageRenderers = new Map();
   const commands = new Map();
   const selectCalls = [];
   const statuses = [];
@@ -93,6 +94,9 @@ async function loadExtension(t, createChildSession, overrides = {}) {
     },
     registerTool(definition) {
       tools.set(definition.name, definition);
+    },
+    registerMessageRenderer(customType, renderer) {
+      messageRenderers.set(customType, renderer);
     },
     getActiveTools() {
       return overrides.activeTools ?? ["read", "write", "subagent"];
@@ -149,6 +153,7 @@ async function loadExtension(t, createChildSession, overrides = {}) {
   return {
     agentDir,
     tools,
+    messageRenderers,
     statuses,
     warnings,
     sent,
@@ -195,6 +200,7 @@ test("repository package installs the fresh subagent parent tools", async () => 
     registerTool(tool) {
       tools.set(tool.name, tool);
     },
+    registerMessageRenderer() {},
   });
 
   assert.deepEqual([...tools.keys()].sort(), ["kill_subagent", "message_subagent", "subagent"]);
@@ -203,6 +209,13 @@ test("repository package installs the fresh subagent parent tools", async () => 
   const launchSchema = tools.get("subagent").parameters;
   assert.deepEqual(Object.keys(launchSchema.properties).sort(), ["display_name", "model_profile", "prompt"]);
   assert.deepEqual([...launchSchema.required].sort(), ["display_name", "prompt"]);
+});
+
+test("registers renderers for progress, questions, completion, and failure only", async (t) => {
+  const extension = await loadExtension(t, async () => fakeChild());
+  assert.deepEqual([...extension.messageRenderers.keys()].sort(), [
+    "subagent-completed", "subagent-failed", "subagent-progress", "subagent-question",
+  ]);
 });
 
 const plainTheme = { fg: (_color, text) => text };
@@ -484,6 +497,11 @@ test("child progress reaches a busy parent immediately without waking either age
   assert.equal(extension.sent[0].message.customType, "subagent-progress");
   assert.equal(extension.sent[0].message.details.id, launch.details.id);
   assert.equal(extension.sent[0].message.details.display_name, "reporter");
+  assert.equal(extension.sent[0].message.details.body, "Inspected every caller.");
+  assert.equal(
+    extension.sent[0].message.content,
+    `Subagent reporter (${launch.details.id}) progress at ${extension.sent[0].message.details.at}:\n\nInspected every caller.`,
+  );
   assert.match(extension.sent[0].message.content, new RegExp(launch.details.id));
   assert.match(extension.sent[0].message.content, /reporter/);
   assert.match(extension.sent[0].message.content, /Inspected every caller\./);
@@ -562,6 +580,8 @@ test("blocking question steers a busy parent without waiting for settlement", as
   assert.deepEqual(questionNotice.options, { deliverAs: "steer", triggerTurn: true });
   assert.equal(questionNotice.message.details.id, launch.details.id);
   assert.equal(questionNotice.message.details.display_name, "asker");
+  assert.equal(questionNotice.message.details.body, "Which API should I preserve?");
+  assert.equal(questionNotice.message.content, `Subagent asker (${launch.details.id}) asks:\n\nWhich API should I preserve?`);
   assert.match(questionNotice.message.content, /Which API should I preserve\?/);
   await assert.rejects(
     extension.execute({ display_name: "blocked", prompt: "Do not start." }),
@@ -1004,6 +1024,8 @@ test("natural completion inlines the result, disposes the child, and wakes the p
   assert.equal(message.customType, "subagent-completed");
   assert.equal(message.details.id, launch.details.id);
   assert.equal(message.details.display_name, "finisher");
+  assert.equal(message.details.body, "First result block.\nSecond result block.");
+  assert.equal(message.content, `Subagent finisher (${launch.details.id}) completed at ${message.details.at}.\n\n${message.details.body}`);
   assert.deepEqual(options, { deliverAs: "steer", triggerTurn: true });
   assert.match(message.content, /finisher/);
   assert.match(message.content, new RegExp(launch.details.id));
@@ -1119,6 +1141,8 @@ test("natural failure inlines the error and partial text and wakes the parent on
   assert.equal(message.customType, "subagent-failed");
   assert.equal(message.details.id, launch.details.id);
   assert.equal(message.details.display_name, "failing");
+  assert.equal(message.details.body, "provider failed\n\nAvailable partial result.");
+  assert.equal(message.content, `Subagent failing (${launch.details.id}) failed at ${message.details.at}.\n\n${message.details.body}`);
   assert.deepEqual(options, { deliverAs: "steer", triggerTurn: true });
   assert.match(message.content, /provider failed/);
   assert.match(message.content, /Available partial result\./);

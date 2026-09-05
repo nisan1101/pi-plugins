@@ -63,6 +63,12 @@ Natural completion or failure releases the child's active slot and queues the pa
 
 Explicit kill claims the killed outcome and releases any pending child question immediately. For an instantiated child, cancellation is signalled before the bare acknowledgement returns; for a child still starting, it is signalled as soon as construction finishes. Abort, shutdown, and disposal then continue through the same exactly-once cleanup path in the background. The acknowledgement contains no partial text or artifact, and the child sends no later completion wake. To keep in-progress work, message the child to summarize and let it complete naturally instead. There is no result-polling tool.
 
+## Lifecycle messages
+
+In TUI mode, progress, questions, completion, and failure use status-colored headings with short handles such as `renderer-review#1234abcd`. Questions, failure details, and progress remain fully visible. Completion reports show up to eight rendered body lines by default, with a configured-keybinding hint to expand longer reports. Expanded messages show the full Markdown body, full UUID, and precise timestamp when available.
+
+This is presentation only: the parent still receives the complete original message text. Rendering uses persisted message details, not live child state, so it also works after cleanup or session reload. Older messages without rendering metadata retain Pi's default full-content display.
+
 ## Footer
 
 In TUI mode, active children appear in Pi's existing footer with a static themed lifecycle glyph: dim `◌` while starting, success-colored `*` while running, and warning-colored `?` while waiting for a parent answer. Only the glyph is colored; each handle remains `display-name#1234abcd`. The footer shows waiting children first, preserving launch order within the waiting and non-waiting groups. It shows up to three handles and a `+N` remainder, then clears when no child is active.

@@ -26,6 +26,7 @@ import {
   type SubagentLogBridge,
   type SubagentLogEvent,
 } from "./subagent-log.ts";
+import { renderSubagentMessage, subagentMessageStyles, type SubagentMessageDetails } from "./subagent-rendering.ts";
 import {
   defaultDisplays,
   tailCommand,
@@ -366,6 +367,9 @@ export function createSubagentsExtension({
   displays = defaultDisplays,
 }: SubagentsExtensionOptions = {}) {
   return function subagents(pi: ExtensionAPI) {
+    for (const customType of Object.keys(subagentMessageStyles)) {
+      pi.registerMessageRenderer(customType, renderSubagentMessage);
+    }
     const children = new Map<string, ChildRecord>();
     const writeLog = (record: ChildRecord, event: SubagentLogEvent) => {
       for (const line of formatSubagentLog(event, new Date())) record.log.append(line);
@@ -424,7 +428,7 @@ export function createSubagentsExtension({
                   customType: "subagent-question",
                   content: `Subagent ${record.displayName} (${record.id}) asks:\n\n${message}`,
                   display: true,
-                  details,
+                  details: { ...details, body: message } satisfies SubagentMessageDetails,
                 },
                 { deliverAs: "steer", triggerTurn: true },
               ),
@@ -442,7 +446,7 @@ export function createSubagentsExtension({
                 customType: "subagent-progress",
                 content: `Subagent ${record.displayName} (${record.id}) progress at ${at}:\n\n${message}`,
                 display: true,
-                details,
+                details: { ...details, body: message, at } satisfies SubagentMessageDetails,
               },
               { triggerTurn: false },
             );
@@ -525,7 +529,12 @@ export function createSubagentsExtension({
                     (error ? `${error}\n\n` : "") +
                     result,
                   display: true,
-                  details: { id: record.id, display_name: record.displayName },
+                  details: {
+                    id: record.id,
+                    display_name: record.displayName,
+                    body: (error ? `${error}\n\n` : "") + result,
+                    at: finishedAt,
+                  } satisfies SubagentMessageDetails,
                 },
                 { deliverAs: "steer", triggerTurn: true },
               ),
