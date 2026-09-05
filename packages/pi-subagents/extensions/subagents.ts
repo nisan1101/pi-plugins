@@ -16,6 +16,7 @@ import {
   type ExtensionCommandContext,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import {
@@ -113,6 +114,12 @@ interface ChildRecord {
   lastAssistant?: ChildMessage;
   unsubscribe?: () => void;
   log: SubagentLog;
+}
+
+interface SubagentLaunchDetails {
+  id: string;
+  display_name: string;
+  model_profile?: ModelProfile;
 }
 
 interface MessageParentDetails {
@@ -742,7 +749,28 @@ export function createSubagentsExtension({
         prompt: Type.String({ minLength: 1 }),
         model_profile: Type.Optional(StringEnum(PROFILE_NAMES)),
       }),
-      async execute(_toolCallId, { display_name, prompt, model_profile = "inherit" }, _signal, _onUpdate, ctx) {
+      renderResult(result, { expanded, isPartial }, theme, context) {
+        const details = result.details as SubagentLaunchDetails | undefined;
+        // Older results lack the resolved profile; retain their text so warnings stay visible.
+        if (expanded || isPartial || context.isError || details?.model_profile === undefined) {
+          const text = result.content
+            .filter((block) => block.type === "text")
+            .map((block) => block.text)
+            .join("\n");
+          return new Text(theme.fg(context.isError ? "error" : "toolOutput", text), 0, 0);
+        }
+
+        let text = theme.fg(
+          "success",
+          `Started ${handle({ displayName: details.display_name, id: details.id })} in background`,
+        );
+        const requestedProfile = context.args.model_profile ?? "inherit";
+        if (requestedProfile !== details.model_profile) {
+          text += `\n${theme.fg("warning", `Model profile ${requestedProfile} is not configured; using ${details.model_profile}.`)}`;
+        }
+        return new Text(text, 0, 0);
+      },
+      async execute(_toolCallId, { display_name, prompt, model_profile = "inherit" }, _signal, _onUpdate, ctx): Promise<AgentToolResult<SubagentLaunchDetails>> {
         ensureControlsOpen();
         if (!display_name.trim()) throw new Error("display_name must not be empty.");
         if (!prompt.trim()) throw new Error("prompt must not be empty.");
@@ -800,7 +828,11 @@ export function createSubagentsExtension({
                   : ` Model profile ${model_profile} is not configured; using inherit.`),
             },
           ],
-          details: { id: record.id, display_name: record.displayName },
+          details: {
+            id: record.id,
+            display_name: record.displayName,
+            model_profile: resolvedProfile.profile,
+          },
         };
       },
     });

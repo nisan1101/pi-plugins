@@ -205,6 +205,71 @@ test("repository package installs the fresh subagent parent tools", async () => 
   assert.deepEqual([...launchSchema.required].sort(), ["display_name", "prompt"]);
 });
 
+const plainTheme = { fg: (_color, text) => text };
+
+function renderLaunch(extension, result, args = {}, options = {}, context = {}) {
+  return extension.tools.get("subagent").renderResult(
+    result,
+    { expanded: false, isPartial: false, ...options },
+    plainTheme,
+    { args, isError: false, ...context },
+  ).render(200).map((line) => line.trimEnd());
+}
+
+test("launch results stay compact after child cleanup and expand to the unchanged full text", async (t) => {
+  const extension = await loadExtension(t, async () => fakeChild());
+  const args = { display_name: "renderer-review", prompt: "Review rendering." };
+  const launch = await extension.execute(args);
+  const persisted = JSON.parse(JSON.stringify(launch));
+  await waitFor(() => extension.sent.length === 1);
+  await extension.emit("session_shutdown");
+
+  assert.deepEqual(renderLaunch(extension, persisted, args), [
+    `Started renderer-review#${launch.details.id.slice(0, 8)} in background`,
+  ]);
+  assert.equal(
+    renderLaunch(extension, persisted, args, { expanded: true }).join(" "),
+    launch.content[0].text,
+  );
+  assert.deepEqual(launch, persisted);
+});
+
+for (const scenario of [
+  {
+    name: "launch errors remain visible rather than rendering as successful starts",
+    details: { id: "a12bc345", display_name: "review", model_profile: "inherit" },
+    text: "Subagent launch failed.",
+    context: { isError: true },
+  },
+  {
+    name: "launch errors without details retain their full text",
+    text: "Subagent limit 4 reached.",
+    context: { isError: true },
+  },
+  {
+    name: "historical launch results without profile metadata retain their warnings",
+    details: { id: "a12bc345", display_name: "review" },
+    text: "Started review. Model profile high is not configured; using inherit.",
+  },
+  {
+    name: "partial launch results retain their progress text",
+    details: { id: "a12bc345", display_name: "review", model_profile: "inherit" },
+    text: "Preparing the subagent.",
+    options: { isPartial: true },
+  },
+]) {
+  test(scenario.name, async (t) => {
+    const extension = await loadExtension(t, async () => fakeChild());
+    assert.deepEqual(renderLaunch(
+      extension,
+      { content: [{ type: "text", text: scenario.text }], details: scenario.details },
+      {},
+      scenario.options,
+      scenario.context,
+    ), [scenario.text]);
+  });
+}
+
 // Launch is background-only and reusable display names never become identity.
 test("launch returns distinct UUID handles without waiting for child startup", async (t) => {
   const startup = deferred();
@@ -781,7 +846,11 @@ test("configured model profiles select their model and thinking level", async (t
   );
 
   for (const name of NAMED_PROFILES) {
-    await extension.execute({ display_name: name, prompt: `Run ${name}.`, model_profile: name });
+    const args = { display_name: name, prompt: `Run ${name}.`, model_profile: name };
+    const launch = await extension.execute(args);
+    assert.deepEqual(renderLaunch(extension, launch, args), [
+      `Started ${name}#${launch.details.id.slice(0, 8)} in background`,
+    ]);
   }
 
   assert.deepEqual(
@@ -829,6 +898,10 @@ test("unconfigured model profiles visibly fall back to inherited model", async (
       launch.content[0].text,
       new RegExp(`profile ${profile} is not configured; using inherit`, "i"),
     );
+    assert.deepEqual(renderLaunch(extension, launch, { model_profile: profile }), [
+      `Started fallback#${launch.details.id.slice(0, 8)} in background`,
+      `Model profile ${profile} is not configured; using inherit.`,
+    ]);
     assert.equal(extension.warnings.length, 0);
     assert.equal(creations[0].model.id, "parent-model");
     assert.equal(creations[0].thinkingLevel, "high");
