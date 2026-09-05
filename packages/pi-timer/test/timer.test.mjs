@@ -94,6 +94,59 @@ function loadExtension(sessionManager = createSessionManager()) {
   };
 }
 
+const plainTheme = {
+  bold: (text) => text,
+  fg: (_color, text) => text,
+};
+
+for (const { name, args, expected } of [
+  {
+    name: "renders the timer duration and reason",
+    args: { seconds: 60, reason: "Check deployment readiness." },
+    expected: ["Set Timer · 60s", "Check deployment readiness."],
+  },
+  {
+    name: "preserves fractional seconds in the timer header",
+    args: { seconds: 0.5, reason: "Check the build." },
+    expected: ["Set Timer · 0.5s", "Check the build."],
+  },
+  {
+    name: "renders the timer title before arguments arrive",
+    args: {},
+    expected: ["Set Timer"],
+  },
+  {
+    name: "renders the duration before the reason arrives",
+    args: { seconds: 60 },
+    expected: ["Set Timer · 60s"],
+  },
+  {
+    name: "renders the reason before the duration arrives",
+    args: { reason: "Check the build." },
+    expected: ["Set Timer", "Check the build."],
+  },
+]) {
+  test(name, () => {
+    const { tool } = loadExtension();
+    const component = tool.renderCall(args, plainTheme, {});
+    assert.deepEqual(component.render(80).map((line) => line.trimEnd()), expected);
+  });
+}
+
+test("wraps a long timer reason to the available width", () => {
+  const { tool } = loadExtension();
+  const component = tool.renderCall(
+    { seconds: 60, reason: "Check deployment readiness; reschedule if pending." },
+    plainTheme,
+    {},
+  );
+  assert.deepEqual(component.render(30).map((line) => line.trimEnd()), [
+    "Set Timer · 60s",
+    "Check deployment readiness;",
+    "reschedule if pending.",
+  ]);
+});
+
 test("scheduling persists the timer for recovery", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const { tool, shutdown, sessionManager } = loadExtension();

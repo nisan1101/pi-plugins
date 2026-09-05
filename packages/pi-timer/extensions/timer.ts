@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 const MAX_DELAY_MS = 2_147_483_647;
@@ -104,6 +105,16 @@ export default function timer(pi: ExtensionAPI) {
       seconds: Type.Number({ exclusiveMinimum: 0, maximum: MAX_DELAY_SECONDS }),
       reason: Type.String({ minLength: 1 }),
     }),
+    renderCall(args, theme) {
+      let text = theme.fg("toolTitle", theme.bold("Set Timer"));
+      if (args.seconds !== undefined) {
+        text += theme.fg("muted", ` · ${args.seconds}s`);
+      }
+      if (args.reason) {
+        text += `\n${theme.fg("muted", args.reason)}`;
+      }
+      return new Text(text, 0, 0);
+    },
     async execute(toolCallId, { seconds, reason }) {
       const requestedDelayMs = seconds * 1000;
       if (!Number.isFinite(seconds) || requestedDelayMs < 1 || requestedDelayMs > MAX_DELAY_MS) {
