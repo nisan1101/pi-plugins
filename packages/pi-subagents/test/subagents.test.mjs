@@ -3,8 +3,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { stripVTControlCharacters } from "node:util";
 
 import { fauxProvider } from "@earendil-works/pi-ai";
+import { initTheme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 import { createSubagentsExtension } from "../extensions/subagents.ts";
 
@@ -218,7 +221,82 @@ test("registers renderers for progress, questions, completion, and failure only"
   ]);
 });
 
-const plainTheme = { fg: (_color, text) => text };
+const plainTheme = { fg: (_color, text) => text, bold: (text) => text };
+
+function renderToolCall(extension, name, args, { expanded = false, width = 100 } = {}) {
+  const lines = extension.tools.get(name).renderCall(args, plainTheme, { expanded }).render(width);
+  assert.ok(lines.every((line) => visibleWidth(line) <= width));
+  return lines.map((line) => stripVTControlCharacters(line).trimEnd());
+}
+
+for (const { name, tool, args, expected } of [
+  {
+    name: "launch headers show the name, requested profile, and task",
+    tool: "subagent",
+    args: { display_name: "renderer-review", model_profile: "high", prompt: "Review rendering." },
+    expected: ["Subagent · renderer-review · high", "Review rendering."],
+  },
+  {
+    name: "launch headers show the inherited profile when omitted",
+    tool: "subagent",
+    args: { display_name: "review", prompt: "Inspect tests." },
+    expected: ["Subagent · review · inherit", "Inspect tests."],
+  },
+  {
+    name: "message headers show the recipient and guidance",
+    tool: "message_subagent",
+    args: { id: "a12bc345-6789-4123-8123-123456789abc", message: "Focus on timers." },
+    expected: ["Message Subagent · a12bc345", "Focus on timers."],
+  },
+  {
+    name: "kill headers identify the recipient",
+    tool: "kill_subagent",
+    args: { id: "a12bc345-6789-4123-8123-123456789abc" },
+    expected: ["Kill Subagent · a12bc345"],
+  },
+  { name: "launch headers tolerate missing streamed arguments", tool: "subagent", args: {}, expected: ["Subagent · inherit"] },
+  { name: "message headers tolerate missing streamed arguments", tool: "message_subagent", args: {}, expected: ["Message Subagent"] },
+  { name: "kill headers tolerate missing streamed arguments", tool: "kill_subagent", args: {}, expected: ["Kill Subagent"] },
+  {
+    name: "message headers tolerate an incomplete streamed recipient",
+    tool: "message_subagent",
+    args: { id: "a12", message: "Partial guidance" },
+    expected: ["Message Subagent · a12", "Partial guidance"],
+  },
+]) {
+  test(name, async (t) => {
+    const extension = await loadExtension(t, async () => fakeChild());
+    const original = structuredClone(args);
+    assert.deepEqual(renderToolCall(extension, tool, args), expected);
+    assert.deepEqual(args, original);
+  });
+}
+
+test("launch headers preview three wrapped task lines and expand to the full prompt", async (t) => {
+  initTheme("dark");
+  const extension = await loadExtension(t, async () => fakeChild());
+  const args = {
+    display_name: "review",
+    prompt: Array.from({ length: 16 }, (_, i) => `task-${i}`).join(" "),
+  };
+  const collapsed = renderToolCall(extension, "subagent", args, { width: 30 });
+  // The title fits on one line, followed by three task lines and an expansion hint.
+  assert.equal(collapsed.length, 5);
+  assert.ok(!collapsed.join(" ").includes("task-15"));
+  assert.match(collapsed.at(-1), /to expand/);
+  const expanded = renderToolCall(extension, "subagent", args, { width: 30, expanded: true });
+  assert.equal(expanded.slice(1).join(" "), args.prompt);
+});
+
+for (const tool of ["message_subagent", "kill_subagent"]) {
+  test(`${tool} headers expand to the full UUID without requiring a live child`, async (t) => {
+    const extension = await loadExtension(t, async () => fakeChild());
+    const id = "a12bc345-6789-4123-8123-123456789abc";
+    await extension.emit("session_shutdown");
+    assert.ok(renderToolCall(extension, tool, { id }, { expanded: true }).join("\n").includes(id));
+  });
+}
+
 
 function renderLaunch(extension, result, args = {}, options = {}, context = {}) {
   return extension.tools.get("subagent").renderResult(

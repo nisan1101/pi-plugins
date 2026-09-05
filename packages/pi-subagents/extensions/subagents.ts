@@ -8,6 +8,7 @@ import {
   defineTool,
   DefaultResourceLoader,
   getAgentDir,
+  keyHint,
   SessionManager,
   SettingsManager,
   type AgentToolResult,
@@ -16,7 +17,7 @@ import {
   type ExtensionCommandContext,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { Container, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 import {
@@ -685,6 +686,12 @@ export function createSubagentsExtension({
         id: Type.String(),
         message: Type.String({ minLength: 1 }),
       }),
+      renderCall(args, theme, { expanded }) {
+        let text = theme.fg("toolTitle", theme.bold("Message Subagent"));
+        if (args.id) text += theme.fg("muted", ` · ${expanded ? args.id : args.id.slice(0, 8)}`);
+        if (args.message) text += `\n${theme.fg("muted", args.message)}`;
+        return new Text(text, 0, 0);
+      },
       async execute(_toolCallId, { id, message }, _signal, _onUpdate, ctx) {
         ensureControlsOpen();
         if (!UUID_PATTERN.test(id)) throw new Error("id must be a full subagent UUID.");
@@ -725,6 +732,11 @@ export function createSubagentsExtension({
       description:
         "Immediately claim one active subagent as killed by full UUID. Cancellation is signaled first when a child session exists; shutdown and disposal continue in the background. This returns no result: no partial output and no artifact. To keep in-progress work, message the subagent to summarize and let it finish instead. This cannot force-stop synchronous code or extensions that ignore cancellation.",
       parameters: Type.Object({ id: Type.String() }),
+      renderCall(args, theme, { expanded }) {
+        let text = theme.fg("toolTitle", theme.bold("Kill Subagent"));
+        if (args.id) text += theme.fg("muted", ` · ${expanded ? args.id : args.id.slice(0, 8)}`);
+        return new Text(text, 0, 0);
+      },
       async execute(_toolCallId, { id }, _signal, _onUpdate, ctx) {
         ensureControlsOpen();
         if (!UUID_PATTERN.test(id)) throw new Error("id must be a full subagent UUID.");
@@ -761,6 +773,26 @@ export function createSubagentsExtension({
         prompt: Type.String({ minLength: 1 }),
         model_profile: Type.Optional(StringEnum(PROFILE_NAMES)),
       }),
+      renderCall(args, theme, { expanded }) {
+        let title = theme.fg("toolTitle", theme.bold("Subagent"));
+        if (args.display_name) title += theme.fg("muted", ` · ${args.display_name}`);
+        title += theme.fg("muted", ` · ${args.model_profile ?? "inherit"}`);
+        const container = new Container();
+        container.addChild(new Text(title, 0, 0));
+        if (args.prompt) {
+          const prompt = new Text(theme.fg("muted", args.prompt), 0, 0);
+          container.addChild({
+            render(width) {
+              const lines = prompt.render(width);
+              if (expanded || lines.length <= 3) return lines;
+              const hint = new Text(theme.fg("dim", `… (${keyHint("app.tools.expand", "to expand")})`), 0, 0);
+              return [...lines.slice(0, 3), ...hint.render(width)];
+            },
+            invalidate: () => prompt.invalidate(),
+          });
+        }
+        return container;
+      },
       renderResult(result, { expanded, isPartial }, theme, context) {
         const details = result.details as SubagentLaunchDetails | undefined;
         // Older results lack the resolved profile; retain their text so warnings stay visible.

@@ -63,6 +63,10 @@ Natural completion or failure releases the child's active slot and queues the pa
 
 Explicit kill claims the killed outcome and releases any pending child question immediately. For an instantiated child, cancellation is signalled before the bare acknowledgement returns; for a child still starting, it is signalled as soon as construction finishes. Abort, shutdown, and disposal then continue through the same exactly-once cleanup path in the background. The acknowledgement contains no partial text or artifact, and the child sends no later completion wake. To keep in-progress work, message the child to summarize and let it complete naturally instead. There is no result-polling tool.
 
+## Tool-call headers
+
+In TUI mode, launch headers show the display name, requested model profile (defaulting to `inherit`), and up to three rendered lines of the delegated task. Expand the tool row to see the full prompt. Message headers show the recipient's short UUID and guidance text; kill headers show the recipient's short UUID. Expanded message and kill headers show the full UUID. These headers use only call arguments, so they remain available after child cleanup and do not change the tool inputs.
+
 ## Lifecycle messages
 
 In TUI mode, progress, questions, completion, and failure use status-colored headings with short handles such as `renderer-review#1234abcd`. Questions, failure details, and progress remain fully visible. Completion reports show up to eight rendered body lines by default, with a configured-keybinding hint to expand longer reports. Expanded messages show the full Markdown body, full UUID, and precise timestamp when available.
