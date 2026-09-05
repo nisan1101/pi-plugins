@@ -65,7 +65,7 @@ Explicit kill claims the killed outcome and releases any pending child question 
 
 ## Footer
 
-In TUI mode, active children appear in Pi's existing footer with a static themed lifecycle glyph: dim `◌` while starting, success-colored `*` while running, and warning-colored `?` while waiting for a parent answer. Only the glyph is colored; each handle remains `display-name#1234abcd`. The footer shows up to three handles and a `+N` remainder, then clears when no child is active.
+In TUI mode, active children appear in Pi's existing footer with a static themed lifecycle glyph: dim `◌` while starting, success-colored `*` while running, and warning-colored `?` while waiting for a parent answer. Only the glyph is colored; each handle remains `display-name#1234abcd`. The footer shows waiting children first, preserving launch order within the waiting and non-waiting groups. It shows up to three handles and a `+N` remainder, then clears when no child is active.
 
 The footer is optional presentation only. Launch, communication, results, and cleanup also work in RPC, JSON, and print modes.
 

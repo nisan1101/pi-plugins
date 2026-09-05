@@ -226,7 +226,10 @@ function renderStatus(
   records: Iterable<ChildRecord>,
   theme?: ExtensionContext["ui"]["theme"],
 ): string | undefined {
-  const handles = [...records].filter(isActive).map((record) => {
+  const active = [...records].filter(isActive);
+  // Stable sorting preserves launch order within the waiting and non-waiting groups.
+  active.sort((a, b) => Number(b.state.phase === "waiting") - Number(a.state.phase === "waiting"));
+  const handles = active.map((record) => {
     const label = handle(record);
     if (!theme) return label;
     const glyph =

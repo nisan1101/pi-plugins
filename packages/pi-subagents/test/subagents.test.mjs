@@ -341,6 +341,56 @@ test("footer distinguishes starting, running, and waiting subagents", async (t) 
   await waitFor(() => extension.sent.some(({ message }) => message.customType === "subagent-completed"));
 });
 
+test("footer prioritizes waiting children in launch order and restores order after answers", async (t) => {
+  const runs = Array.from({ length: 4 }, () => deferred());
+  const started = Array.from({ length: 4 }, () => deferred());
+  const childOptions = [];
+  const extension = await loadExtension(t, async (options) => {
+    const index = childOptions.push(options) - 1;
+    return fakeChild({
+      async prompt() {
+        started[index].resolve();
+        await runs[index].promise;
+      },
+    });
+  });
+  t.after(async () => {
+    runs.forEach((run) => run.resolve());
+    await extension.emit("session_shutdown");
+  });
+
+  const launches = [];
+  for (const name of ["first", "second", "third", "fourth"]) {
+    launches.push(await extension.execute({ display_name: name, prompt: `Run ${name}.` }));
+  }
+  await Promise.all(started.map((start) => start.promise));
+
+  const label = (index, waiting = false) => {
+    const { display_name, id } = launches[index].details;
+    const glyph = waiting ? "<warning>?</warning>" : "<success>*</success>";
+    return `${glyph} ${display_name}#${id.slice(0, 8)}`;
+  };
+  const assertFooter = (...labels) => {
+    assert.equal(extension.statuses.at(-1).text, [...labels, "+1"].join(" "));
+  };
+  assertFooter(label(0), label(1), label(2));
+
+  const fourthQuestion = callTool(childOptions[3].messageParentTool, { kind: "question", message: "Continue fourth?" });
+  assertFooter(label(3, true), label(0), label(1));
+
+  // Ask in reverse launch order: waiting children must still retain launch order.
+  const thirdQuestion = callTool(childOptions[2].messageParentTool, { kind: "question", message: "Continue third?" });
+  assertFooter(label(2, true), label(3, true), label(0));
+
+  await extension.message({ id: launches[2].details.id, message: "Continue third." });
+  await thirdQuestion;
+  assertFooter(label(3, true), label(0), label(1));
+
+  await extension.message({ id: launches[3].details.id, message: "Continue fourth." });
+  await fourthQuestion;
+  assertFooter(label(0), label(1), label(2));
+});
+
 // Parent guidance stays bound to a full UUID and switches from startup buffering to native steering.
 test("parent messages buffer during startup and steer only the addressed running child", async (t) => {
   const startups = [deferred(), deferred()];
