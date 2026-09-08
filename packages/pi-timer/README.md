@@ -22,7 +22,7 @@ Pi SDK `0.84.2` has no non-cancellable pre-commit tree hook. If a later extensio
 
 ## Agent workflow
 
-For a local long-running command, prefer zmx when available and give the session a meaningful name:
+For a test suite you expect to take several minutes, use a managed background job. Prefer zmx when available and give the session a meaningful name:
 
 ```bash
 zmx run build-check -d npm test
@@ -31,8 +31,9 @@ zmx run build-check -d npm test
 Then call `set_timer` with a self-contained reason that includes that session name:
 
 ```text
-Set a timer for 60 seconds. Check zmx session build-check with zmx list. If it is
-still active, call set_timer again; if it ended, inspect exit_code and report.
+Set a timer for 120 seconds. Check zmx session build-check with zmx list. If it is
+still active, schedule another check based on expected remaining time; if it ended,
+inspect exit_code and report.
 ```
 
 When the timer fires, use `zmx list` for a non-blocking status check. Active tasks have no `ended` field; completed tasks include `ended` and `exit_code`. Do not use `zmx wait` when the task may still be active because it blocks.

@@ -72,7 +72,8 @@ Tree navigation is a cancellation boundary. Before Pi changes the leaf, the exte
 - The delay represents a minimum wait. Runtime scheduling, event-loop load, process suspension, or computer sleep may cause the timer to fire later.
 - Validate the delay against the runtime timer’s supported range. Reject non-finite, non-positive, or unsupported values rather than silently coercing them.
 - Prompt guidance requires the reason to name the target, describe the status check, and state what to do for pending and completed states; managed local work must include its process-manager session or job name. Runtime validation keeps the reason opaque and rejects only blank text.
-- Add a succinct agent instruction preferring named zmx sessions for local long-running commands when zmx is available, otherwise allowing another process manager. Unmanaged raw `&` and `nohup` are not the supported local workflow.
+- Agent guidance makes foreground execution the default for local commands and reserves background execution and timer-based waiting for work expected to take more than roughly 1–2 minutes. Eligible local jobs use named zmx sessions when available, otherwise another process manager. Unmanaged raw `&` and `nohup` are not the supported local workflow.
+- Polling cadence is separate from task eligibility: guidance prefers 60–120 seconds or longer between checks. These are agent-facing preferences, not runtime restrictions.
 - Add an agent instruction allowing `set_timer` for remote asynchronous conditions such as Kubernetes pod readiness, without requiring a local process.
 - Add an agent instruction requiring `set_timer` to be called alone after all other work in the current run is complete.
 - Add an agent instruction clarifying that a timer means “check the target,” not “the work has completed,” and to reschedule only while the target remains pending.

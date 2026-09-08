@@ -298,7 +298,7 @@ test("resuming reports every interrupted timer without starting a turn", async (
   assert.equal(message.customType, "timer-cancelled");
   assert.equal(message.display, true);
   assert.match(message.content, /timers.*interrupted/i);
-  assert.match(message.content, /timers will not be restored.*underlying local jobs or remote targets were not/i);
+  assert.match(message.content, /timers will not be restored\. Their targets were not inspected or changed; local jobs may still be running/i);
   assert.match(message.content, /Check build one\..*scheduled for/s);
   assert.match(message.content, /Check build two\..*scheduled for/s);
   assert.deepEqual(message.details, { cancelledTimerIds: ["call-1", "call-2"], pending: [] });
@@ -447,17 +447,17 @@ test("set timer teaches the agent when and how to use it", () => {
   assert.equal(tool.parameters.properties.seconds.exclusiveMinimum, 0);
   assert.equal(tool.parameters.properties.seconds.maximum, 2_147_483.647);
   assert.equal(tool.parameters.properties.reason.minLength, 1);
-  assert.match(tool.description, /ends the current run.*later turn wakes/is);
-  assert.match(tool.promptSnippet, /ends the current run.*later turn wakes/is);
-  assert.match(guidance, /ends the current run.*later turn wakes/is);
+  assert.match(tool.description, /ends the current run.*wakes a later turn/is);
+  assert.match(tool.promptSnippet, /yield during long-running.*wake later/is);
   assert.doesNotMatch(promptText, /\b(?:list|cancel)(?:s|led|ling)?\b/i);
 
-  assert.ok(tool.promptGuidelines.length <= 3);
-  assert.match(guidance, /between checks.*local jobs.*remote state/i);
-  assert.match(guidance, /zmx.*when available.*another process manager/i);
-  assert.match(guidance, /session or job name.*reason/i);
-  assert.match(guidance, /avoid.*raw.*&.*nohup/i);
-  assert.match(guidance, /reason must name the target.*status check.*pending or completed/i);
-  assert.match(guidance, /timer.*only a check.*reschedule only while pending/i);
-  assert.match(guidance, /by itself.*other tool calls finish.*every tool result.*batch.*terminating/i);
+  assert.ok(tool.promptGuidelines.every((guideline) => guideline.includes("set_timer")));
+  assert.match(guidance, /foreground by default/i);
+  assert.match(guidance, /expect the work to take more than roughly 1–2 minutes/i);
+  assert.match(guidance, /same duration guideline.*remote state/i);
+  assert.match(guidance, /zmx when available.*another process manager/i);
+  assert.match(guidance, /self-contained reason naming the target.*session or job name.*check its status.*pending or complete/i);
+  assert.match(guidance, /check the target’s current status and reschedule only while pending/i);
+  assert.match(guidance, /prefer intervals of 60–120 seconds or longer/i);
+  assert.match(guidance, /alone in its tool-call batch.*other tool calls finish.*end the current run/i);
 });

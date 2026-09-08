@@ -78,7 +78,7 @@ export default function timer(pi: ExtensionAPI) {
         customType: TIMER_CANCELLED_TYPE,
         content:
           `${cause} ` +
-          "These timers will not be restored; the underlying local jobs or remote targets were not inspected, stopped, or changed.\n\n" +
+          "These timers will not be restored. Their targets were not inspected or changed; local jobs may still be running.\n\n" +
           summary,
         display: true,
         details: {
@@ -93,13 +93,15 @@ export default function timer(pi: ExtensionAPI) {
     name: "set_timer",
     label: "Set Timer",
     description:
-      "Set a relative timer that ends the current run; when it fires, a later turn wakes you to re-check external work you must poll — a process-manager job, CI, or a remote condition like Kubernetes pod readiness.",
+      "Set a relative timer to revisit long-running external work, such as a managed local job, CI, or Kubernetes pod readiness. Ends the current run and wakes a later turn to check progress.",
     promptSnippet:
-      "Set a relative timer that ends the current run; when it fires, a later turn wakes you to re-check external state",
+      "Yield during long-running external work and wake later to check progress",
     promptGuidelines: [
-      "Use set_timer between checks of long-running local jobs or remote state you must poll, such as Kubernetes pod readiness or CI completion. Calling set_timer ends the current run; when the timer fires, a later turn wakes you to re-check the target.",
-      "Before set_timer for a local job, use zmx when available (`zmx run <session> -d <command...>`); otherwise use another process manager. Include its session or job name in the reason; avoid unmanaged raw `&` or `nohup`.",
-      "The set_timer reason must name the target, status check, and actions for pending or completed states. A timer is only a check: reschedule only while pending. Call set_timer by itself after all other tool calls finish; Pi ends the run only when every tool result in that batch is terminating.",
+      "Run local commands in the foreground by default. Choose managed background execution and set_timer when you reasonably expect the work to take more than roughly 1–2 minutes. Apply the same duration guideline when deciding whether to use set_timer while waiting on remote state.",
+      "For local work that warrants set_timer, launch a named job with zmx when available (`zmx run <session> -d <command...>`), otherwise another process manager.",
+      "Give set_timer a self-contained reason naming the target (including the session or job name for local work), how to check its status, and what to do if pending or complete.",
+      "When polling with set_timer, check the target’s current status and reschedule only while pending. Prefer intervals of 60–120 seconds or longer, based on expected completion time.",
+      "Call set_timer alone in its tool-call batch, after other tool calls finish, so it can end the current run.",
     ],
     parameters: Type.Object({
       seconds: Type.Number({ exclusiveMinimum: 0, maximum: MAX_DELAY_SECONDS }),
@@ -149,7 +151,7 @@ export default function timer(pi: ExtensionAPI) {
   pi.on("session_start", (_event, { sessionManager }) => {
     reportCancelledTimers(
       findPendingTimers(sessionManager),
-      "Timers from a previous Pi process were interrupted before their messages reached the agent.",
+      "These timers were interrupted before their notifications reached the agent.",
     );
   });
 
@@ -164,7 +166,7 @@ export default function timer(pi: ExtensionAPI) {
   pi.on("session_tree", (_event, { sessionManager }) => {
     reportCancelledTimers(
       findPendingTimers(sessionManager),
-      "Tree navigation cancelled timers recorded on this branch before their messages reached the agent.",
+      "Tree navigation cancelled these timers recorded on this branch.",
     );
   });
 
