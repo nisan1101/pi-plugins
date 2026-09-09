@@ -1707,6 +1707,11 @@ test("invalid and unavailable profiles leave no active child", async (t) => {
       }),
       error: /invalid model profile low/i,
     },
+    { source: JSON.stringify({ blockedModels: "opus" }), error: /blockedModels must be an array/i },
+    {
+      source: JSON.stringify({ blockedModels: [{ provider: "anthropic" }] }),
+      error: /invalid blocked model/i,
+    },
   ];
 
   for (const scenario of cases) {
@@ -1734,6 +1739,58 @@ test("invalid and unavailable profiles leave no active child", async (t) => {
     assert.equal(creations, 0);
     assert.equal(extension.statuses.length, 0);
   }
+});
+
+// A denied model is rejected on every launch path while the parent's own model stays unrestricted.
+test("blocked models cannot run as subagents", async (t) => {
+  const factoryMustNotRun = async () => {
+    throw new Error("factory should not run");
+  };
+
+  // Inherit path: the parent's blocked model must not leak into a child, matched case-insensitively.
+  const inheritCase = await loadExtension(t, factoryMustNotRun, {
+    model: { provider: "anthropic", id: "claude-opus-4-6" },
+  });
+  await writeFile(
+    join(inheritCase.agentDir, "subagents.json"),
+    JSON.stringify({ blockedModels: [{ provider: "Anthropic", model: "Claude-Opus-4-6" }] }),
+  );
+  await assert.rejects(
+    inheritCase.execute({ display_name: "blocked", prompt: "Do not start." }),
+    /anthropic\/claude-opus-4-6 is blocked for subagents/i,
+  );
+  assert.equal(inheritCase.statuses.length, 0);
+
+  // Named-profile path: a profile mapped to a blocked model is rejected too.
+  const profileCase = await loadExtension(t, factoryMustNotRun, {
+    modelRegistry: {
+      find: () => ({ provider: "test", id: "blocked-model", reasoning: true }),
+      hasConfiguredAuth: () => true,
+    },
+  });
+  await writeFile(
+    join(profileCase.agentDir, "subagents.json"),
+    JSON.stringify({
+      profiles: { low: { provider: "test", model: "blocked-model", thinkingLevel: "low" } },
+      blockedModels: [{ provider: "test", model: "blocked-model" }],
+    }),
+  );
+  await assert.rejects(
+    profileCase.execute({ display_name: "blocked", prompt: "Do not start.", model_profile: "low" }),
+    /test\/blocked-model is blocked for subagents/i,
+  );
+  assert.equal(profileCase.statuses.length, 0);
+
+  // An unblocked model still launches normally.
+  const allowedCase = await loadExtension(t, async () =>
+    fakeChild({ messages: [{ role: "assistant", content: [{ type: "text", text: "Done." }] }] }),
+  );
+  await writeFile(
+    join(allowedCase.agentDir, "subagents.json"),
+    JSON.stringify({ blockedModels: [{ provider: "anthropic", model: "claude-opus-4-6" }] }),
+  );
+  const launch = await allowedCase.execute({ display_name: "ok", prompt: "Proceed." });
+  assert.match(launch.content[0].text, /Started ok/);
 });
 
 // Footer presentation is optional and an empty terminal answer still produces an explicit result.

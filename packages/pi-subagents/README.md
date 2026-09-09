@@ -40,7 +40,8 @@ Configuration is global at `$PI_CODING_AGENT_DIR/subagents.json`, which defaults
       "model": "claude-opus-4-6",
       "thinkingLevel": "high"
     }
-  }
+  },
+  "blockedModels": [{ "provider": "anthropic", "model": "claude-opus-4-6" }]
 }
 ```
 
@@ -48,6 +49,7 @@ Configuration is global at `$PI_CODING_AGENT_DIR/subagents.json`, which defaults
 - `inherit` is the default profile and uses the parent's current model and thinking level.
 - Named profiles are `low`, `medium`, `high`, and `xhigh`. A configured mapping requires an available provider/model and a thinking level supported by that model.
 - Requesting a named profile with no mapping—including when the file or `profiles` object is absent—falls back to `inherit` and says so in the successful launch response. Malformed configuration and configured profiles that are invalid or unavailable still reject launch.
+- `blockedModels` denies specific models from subagents, matched case-insensitively by `provider`/`model` against the resolved model. It applies to every launch path—`inherit`, a named profile, and the inherit fallback of an unconfigured profile—so a blocked parent model cannot leak into a child. A blocked launch is rejected with an actionable error rather than downgraded; relaunch with an allowed `model_profile`. The parent's own model is never restricted. It defaults to empty, and a malformed `blockedModels` rejects launch fail-closed.
 - Project-local profile overrides are not supported.
 
 ## Communication and results

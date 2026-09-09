@@ -56,9 +56,15 @@ interface ProfileConfig {
   thinkingLevel: ThinkingLevel;
 }
 
+interface BlockedModel {
+  provider: string;
+  model: string;
+}
+
 interface SubagentsConfig {
   maxConcurrent: number;
   profiles: Partial<Record<NamedModelProfile, ProfileConfig>>;
+  blockedModels: BlockedModel[];
 }
 
 interface ChildMessage {
@@ -287,7 +293,7 @@ async function readConfig(agentDir: string, ctx: ExtensionContext): Promise<Suba
     source = await readFile(join(agentDir, CONFIG_FILE), "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { maxConcurrent: DEFAULT_MAX_CONCURRENT, profiles: {} };
+      return { maxConcurrent: DEFAULT_MAX_CONCURRENT, profiles: {}, blockedModels: [] };
     }
     throw new Error(`Cannot read ${CONFIG_FILE}: ${errorMessage(error)}`);
   }
@@ -334,7 +340,36 @@ async function readConfig(agentDir: string, ctx: ExtensionContext): Promise<Suba
     };
   }
 
-  return { maxConcurrent, profiles };
+  const rawBlocked = raw.blockedModels === undefined ? [] : raw.blockedModels;
+  if (!Array.isArray(rawBlocked)) throw new Error(`${CONFIG_FILE} blockedModels must be an array.`);
+  const blockedModels: BlockedModel[] = rawBlocked.map((value) => {
+    if (
+      !isRecord(value) ||
+      typeof value.provider !== "string" ||
+      !value.provider.trim() ||
+      typeof value.model !== "string" ||
+      !value.model.trim()
+    ) {
+      throw new Error(`Invalid blocked model in ${CONFIG_FILE}; each entry needs a provider and model.`);
+    }
+    return { provider: value.provider, model: value.model };
+  });
+
+  return { maxConcurrent, profiles, blockedModels };
+}
+
+// A subagent may never run a denied model, whether it arrives through inherit or a named profile.
+function assertModelAllowed(model: Model, config: SubagentsConfig): void {
+  const blocked = config.blockedModels.some(
+    (entry) =>
+      entry.provider.toLowerCase() === model.provider.toLowerCase() &&
+      entry.model.toLowerCase() === model.id.toLowerCase(),
+  );
+  if (blocked) {
+    throw new Error(
+      `Model ${model.provider}/${model.id} is blocked for subagents; relaunch with an allowed model_profile.`,
+    );
+  }
 }
 
 function resolveProfile(
@@ -345,6 +380,7 @@ function resolveProfile(
 ): { profile: ModelProfile; model: Model; thinkingLevel: ThinkingLevel } {
   if (profile === "inherit") {
     if (!ctx.model) throw new Error("Cannot launch a subagent without an active parent model.");
+    assertModelAllowed(ctx.model, config);
     return { profile, model: ctx.model, thinkingLevel: inheritedThinkingLevel };
   }
 
@@ -354,6 +390,7 @@ function resolveProfile(
   if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
     throw new Error(`Model profile ${profile} is unavailable: ${configured.provider}/${configured.model}.`);
   }
+  assertModelAllowed(model, config);
   if (!getSupportedThinkingLevels(model).includes(configured.thinkingLevel)) {
     throw new Error(
       `Model profile ${profile} requests unsupported thinking level ${configured.thinkingLevel}.`,
