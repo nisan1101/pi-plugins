@@ -141,7 +141,7 @@ export default function timer(pi: ExtensionAPI) {
       persistPendingTimers();
 
       return {
-        content: [{ type: "text", text: `Set a timer for ${seconds} seconds.` }],
+        content: [{ type: "text", text: "Timer scheduled." }],
         details: { seconds, reason },
         terminate: true,
       };

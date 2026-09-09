@@ -343,7 +343,7 @@ test("timer releases the agent and later triggers it", async (t) => {
   const result = await tool.execute("call-1", { seconds: 1, reason });
 
   assert.equal(result.terminate, true);
-  assert.equal(result.content[0].text, "Set a timer for 1 seconds.");
+  assert.equal(result.content[0].text, "Timer scheduled.");
   assert.deepEqual(result.details, { seconds: 1, reason });
   assert.equal(sent.length, 0);
 
