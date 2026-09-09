@@ -1741,6 +1741,26 @@ test("invalid and unavailable profiles leave no active child", async (t) => {
   }
 });
 
+test("unconfigured profile errors explain fallback to a blocked parent before allocating a child", async (t) => {
+  let creations = 0;
+  const extension = await loadExtension(t, async () => {
+    creations += 1;
+    return fakeChild();
+  });
+  await writeFile(
+    join(extension.agentDir, "subagents.json"),
+    JSON.stringify({ blockedModels: [{ provider: "test", model: "parent-model" }] }),
+  );
+
+  await assert.rejects(
+    extension.execute({ display_name: "blocked", prompt: "Do not start.", model_profile: "medium" }),
+    { message: "Model profile medium is not configured in subagents.json; it falls back to inherit. Model test/parent-model is blocked for subagents. Configure profiles.medium with an allowed model in subagents.json, or select another configured, allowed model_profile." },
+  );
+  assert.equal(creations, 0);
+  assert.equal(extension.statuses.length, 0);
+  assert.equal(extension.logLines.size, 0);
+});
+
 // A denied model is rejected on every launch path while the parent's own model stays unrestricted.
 test("blocked models cannot run as subagents", async (t) => {
   const factoryMustNotRun = async () => {

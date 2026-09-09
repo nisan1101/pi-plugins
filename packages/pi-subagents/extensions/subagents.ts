@@ -359,13 +359,21 @@ async function readConfig(agentDir: string, ctx: ExtensionContext): Promise<Suba
 }
 
 // A subagent may never run a denied model, whether it arrives through inherit or a named profile.
-function assertModelAllowed(model: Model, config: SubagentsConfig): void {
+function assertModelAllowed(model: Model, config: SubagentsConfig, missingProfile?: NamedModelProfile): void {
   const blocked = config.blockedModels.some(
     (entry) =>
       entry.provider.toLowerCase() === model.provider.toLowerCase() &&
       entry.model.toLowerCase() === model.id.toLowerCase(),
   );
   if (blocked) {
+    if (missingProfile) {
+      throw new Error(
+        `Model profile ${missingProfile} is not configured in ${CONFIG_FILE}; it falls back to inherit. ` +
+          `Model ${model.provider}/${model.id} is blocked for subagents. ` +
+          `Configure profiles.${missingProfile} with an allowed model in ${CONFIG_FILE}, ` +
+          "or select another configured, allowed model_profile.",
+      );
+    }
     throw new Error(
       `Model ${model.provider}/${model.id} is blocked for subagents; relaunch with an allowed model_profile.`,
     );
@@ -378,14 +386,13 @@ function resolveProfile(
   ctx: ExtensionContext,
   inheritedThinkingLevel: ThinkingLevel,
 ): { profile: ModelProfile; model: Model; thinkingLevel: ThinkingLevel } {
-  if (profile === "inherit") {
+  const configured = profile === "inherit" ? undefined : config.profiles[profile];
+  if (!configured) {
     if (!ctx.model) throw new Error("Cannot launch a subagent without an active parent model.");
-    assertModelAllowed(ctx.model, config);
-    return { profile, model: ctx.model, thinkingLevel: inheritedThinkingLevel };
+    assertModelAllowed(ctx.model, config, profile === "inherit" ? undefined : profile);
+    return { profile: "inherit", model: ctx.model, thinkingLevel: inheritedThinkingLevel };
   }
 
-  const configured = config.profiles[profile];
-  if (!configured) return resolveProfile("inherit", config, ctx, inheritedThinkingLevel);
   const model = ctx.modelRegistry.find(configured.provider, configured.model);
   if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
     throw new Error(`Model profile ${profile} is unavailable: ${configured.provider}/${configured.model}.`);
