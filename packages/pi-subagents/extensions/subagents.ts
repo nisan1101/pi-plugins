@@ -187,11 +187,11 @@ async function createPiChildSession(options: ChildSessionOptions): Promise<Child
 }
 
 function childRolePrompt(parentPrompt: string): string {
-  return `${parentPrompt}\n\n# Fresh subagent role\n\nYou are a fresh subagent, not the parent agent. You have no parent conversation history. The parent remains authoritative and has delegated one narrow task to you.\n\nYou share the parent's working directory with concurrent work. Inspect current file contents before editing. Modify files only when the delegated task explicitly asks for implementation. Never revert unrelated changes. If current work conflicts with the delegated task, stop and report the conflict instead of forcing a resolution.\n\nYour final assistant message is delivered to the parent verbatim as your result, so make it a complete, self-contained deliverable. Produce files or other on-disk artifacts only when the delegated task asks for them.\n\nUse message_parent with kind progress only for meaningful milestones, not routine tool activity. Use kind question when you must block for parent guidance.`;
+  return `${parentPrompt}\n\n# Subagent role\n\nYou are a subagent. The parent remains authoritative and has delegated one narrow task to you. Do only what the task asks — don't expand scope; note any follow-ups in your result instead of acting on them.\n\nYou share the parent's working directory with concurrent work. Inspect current file contents before editing. Change or create files only when the task calls for it, and never revert unrelated changes. If current work conflicts with the task, stop and report the conflict instead of forcing a resolution.\n\nYour final assistant message is delivered to the parent verbatim as your result, so make it a complete, self-contained deliverable that directly fulfills the task: the answer or outcome, relevant paths, and any commands or caveats the parent needs to act without re-deriving your work. If you can't complete the task, report what you tried and why rather than guessing.\n\nUse message_parent with kind progress only for meaningful milestones, not routine tool activity. Use kind question when you must block for parent guidance.`;
 }
 
 function delegatedTask(record: ChildRecord): string {
-  return `--- delegated_task ---\nsubagent_id: ${record.id}\ndisplay_name: ${record.displayName}\ncontext: fresh; no parent conversation inherited\ntask:\n${record.prompt}\n--- end delegated_task ---`;
+  return `--- delegated_task ---\nsubagent_id: ${record.id}\ndisplay_name: ${record.displayName}\ntask:\n${record.prompt}\n--- end delegated_task ---`;
 }
 
 const NO_FINAL_TEXT = "_No final textual result._";
@@ -395,7 +395,7 @@ function resolveProfile(
 
   const model = ctx.modelRegistry.find(configured.provider, configured.model);
   if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
-    throw new Error(`Model profile ${profile} is unavailable: ${configured.provider}/${configured.model}.`);
+    throw new Error(`Model profile ${profile} is unavailable: ${configured.provider}/${configured.model}. Choose another model_profile.`);
   }
   assertModelAllowed(model, config);
   if (!getSupportedThinkingLevels(model).includes(configured.thinkingLevel)) {
@@ -447,9 +447,12 @@ export function createSubagentsExtension({
       defineTool({
         name: "message_parent",
         label: "Message Parent",
-        description: "Report meaningful progress or ask the parent a blocking question.",
+        description: "Report a progress milestone (non-blocking) or ask the parent a question (blocks until they reply).",
         parameters: Type.Object({
-          kind: StringEnum(["progress", "question"] as const),
+          kind: StringEnum(["progress", "question"] as const, {
+            description:
+              "`progress` reports a milestone without blocking. `question` blocks you until the parent replies — use only when you can't proceed without guidance.",
+          }),
           message: Type.String({ minLength: 1 }),
         }),
         async execute(_toolCallId, { kind, message }): Promise<AgentToolResult<MessageParentDetails>> {
@@ -471,7 +474,7 @@ export function createSubagentsExtension({
               pi.sendMessage(
                 {
                   customType: "subagent-question",
-                  content: `Subagent ${record.displayName} (${record.id}) asks:\n\n${message}`,
+                  content: `Subagent ${record.displayName} (${record.id}) asks:\n\n${message}\n\nReply with message_subagent (id: ${record.id}) to unblock it.`,
                   display: true,
                   details: { ...details, body: message } satisfies SubagentMessageDetails,
                 },
@@ -725,9 +728,11 @@ export function createSubagentsExtension({
     pi.registerTool({
       name: "message_subagent",
       label: "Message Subagent",
-      description: "Send guidance to one active subagent using its full UUID.",
+      description: "Steer one active subagent, or answer its pending question, by full UUID.",
       parameters: Type.Object({
-        id: Type.String(),
+        id: Type.String({
+          description: "The subagent's full UUID. Short prefixes and display names are not accepted.",
+        }),
         message: Type.String({ minLength: 1 }),
       }),
       renderCall(args, theme, { expanded }) {
@@ -742,7 +747,7 @@ export function createSubagentsExtension({
         if (!message.trim()) throw new Error("message must not be empty.");
         const record = children.get(id);
         if (!record || record.state.phase === "finalizing") {
-          throw new Error(`No active subagent with UUID ${id}.`);
+          throw new Error(`No active subagent with UUID ${id}; it may have already finished or been killed.`);
         }
         const state = record.state;
         if (state.phase === "waiting") {
@@ -758,7 +763,7 @@ export function createSubagentsExtension({
         if (state.phase === "starting") {
           state.guidance.push(message);
           return {
-            content: [{ type: "text" as const, text: `Buffered guidance for ${record.displayName} (${id}).` }],
+            content: [{ type: "text" as const, text: `Buffered guidance for ${record.displayName} (${id}); it will be delivered once the subagent starts running.` }],
             details: { id, display_name: record.displayName },
           };
         }
@@ -774,8 +779,12 @@ export function createSubagentsExtension({
       name: "kill_subagent",
       label: "Kill Subagent",
       description:
-        "Immediately claim one active subagent as killed by full UUID. Cancellation is signaled first when a child session exists; shutdown and disposal continue in the background. This returns no result: no partial output and no artifact. To keep in-progress work, message the subagent to summarize and let it finish instead. This cannot force-stop synchronous code or extensions that ignore cancellation.",
-      parameters: Type.Object({ id: Type.String() }),
+        "Mark one active subagent as killed by full UUID. Cancellation is signaled and shutdown continues in the background. This returns no result: no partial output and no artifact. To keep in-progress work, message the subagent to summarize and let it finish instead.",
+      parameters: Type.Object({
+        id: Type.String({
+          description: "The subagent's full UUID. Short prefixes and display names are not accepted.",
+        }),
+      }),
       renderCall(args, theme, { expanded }) {
         let text = theme.fg("toolTitle", theme.bold("Kill Subagent"));
         if (args.id) text += theme.fg("muted", ` · ${expanded ? args.id : args.id.slice(0, 8)}`);
@@ -786,20 +795,20 @@ export function createSubagentsExtension({
         if (!UUID_PATTERN.test(id)) throw new Error("id must be a full subagent UUID.");
         const record = children.get(id);
         if (!record || record.state.phase === "finalizing") {
-          throw new Error(`No active subagent with UUID ${id}.`);
+          throw new Error(`No active subagent with UUID ${id}; it may have already finished or been killed.`);
         }
 
         const state = record.state;
         const child = state.phase === "starting" ? undefined : state.child;
         const finalization = claimFinalization(record, ctx, child, { status: "killed", abort: true });
-        if (!finalization) throw new Error(`No active subagent with UUID ${id}.`);
+        if (!finalization) throw new Error(`No active subagent with UUID ${id}; it may have already finished or been killed.`);
         void finalization.catch(() => {});
 
         return {
           content: [
             {
               type: "text" as const,
-              text: `Cooperatively killed ${record.displayName} (${id}).`,
+              text: `Killed ${record.displayName} (${id}).`,
             },
           ],
           details: { id, display_name: record.displayName },
@@ -811,16 +820,29 @@ export function createSubagentsExtension({
       name: "subagent",
       label: "Subagent",
       description:
-        "Launch one fresh background subagent for a narrow delegated task. Pi wakes you automatically when it completes, fails, or asks a blocking question, so you may end your turn as soon as it launches. Don't wait on it with a Bash `sleep`, `set_timer`, or status poll. It shares your working directory, so don't edit the files it's working on until it finishes.",
+        "Launch a background subagent to delegate a self-contained task or a parallelizable unit of work with a verifiable result. Best when the task can run without your conversation context and its result summarizes back compactly; skip it for trivial work or work that needs the full conversation. Pi wakes you when it completes, fails, or asks a blocking question, so you may end your turn as soon as it launches. Don't wait on it with a Bash `sleep`, `set_timer`, or status poll. You may run several at once (up to the configured limit); partition file edits so you and any subagents touch disjoint files. Don't redo a delegated task yourself while it runs — pick up non-overlapping work instead.",
       parameters: Type.Object({
-        display_name: Type.String({ minLength: 1 }),
-        prompt: Type.String({ minLength: 1 }),
-        model_profile: Type.Optional(StringEnum(PROFILE_NAMES)),
+        display_name: Type.String({
+          minLength: 1,
+          description:
+            "A short human-readable label for the subagent, shown in status and logs. Not an identifier — the returned UUID is the control handle.",
+        }),
+        prompt: Type.String({
+          minLength: 1,
+          description:
+            "The full task for the subagent. It inherits none of this conversation, so make it self-contained — goal, relevant paths, constraints, and the expected output shape.",
+        }),
+        model_profile: Type.Optional(
+          StringEnum(PROFILE_NAMES, {
+            description:
+              "Which model profile the subagent runs under. Defaults to `high`. Profiles are defined in config; an unconfigured profile falls back to your current model.",
+          }),
+        ),
       }),
       renderCall(args, theme, { expanded }) {
         let title = theme.fg("toolTitle", theme.bold("Subagent"));
         if (args.display_name) title += theme.fg("muted", ` · ${args.display_name}`);
-        title += theme.fg("muted", ` · ${args.model_profile ?? "inherit"}`);
+        title += theme.fg("muted", ` · ${args.model_profile ?? "high"}`);
         const container = new Container();
         container.addChild(new Text(title, 0, 0));
         if (args.prompt) {
@@ -852,13 +874,13 @@ export function createSubagentsExtension({
           "success",
           `Started ${handle({ displayName: details.display_name, id: details.id })} in background`,
         );
-        const requestedProfile = context.args.model_profile ?? "inherit";
+        const requestedProfile = context.args.model_profile ?? "high";
         if (requestedProfile !== details.model_profile) {
           text += `\n${theme.fg("warning", `Model profile ${requestedProfile} is not configured; using ${details.model_profile}.`)}`;
         }
         return new Text(text, 0, 0);
       },
-      async execute(_toolCallId, { display_name, prompt, model_profile = "inherit" }, _signal, _onUpdate, ctx): Promise<AgentToolResult<SubagentLaunchDetails>> {
+      async execute(_toolCallId, { display_name, prompt, model_profile = "high" }, _signal, _onUpdate, ctx): Promise<AgentToolResult<SubagentLaunchDetails>> {
         ensureControlsOpen();
         if (!display_name.trim()) throw new Error("display_name must not be empty.");
         if (!prompt.trim()) throw new Error("prompt must not be empty.");
@@ -867,7 +889,7 @@ export function createSubagentsExtension({
         const config = await readConfig(agentDir, ctx);
         if ([...children.values()].filter(isActive).length >= config.maxConcurrent) {
           throw new Error(
-            `Subagent limit ${config.maxConcurrent} reached: ${renderStatus(children.values()) ?? "no active handles"}.`,
+            `Subagent limit ${config.maxConcurrent} reached: ${renderStatus(children.values()) ?? "no active handles"}. Wait for one to finish or kill one.`,
           );
         }
 
@@ -907,10 +929,7 @@ export function createSubagentsExtension({
             {
               type: "text" as const,
               text:
-                `Started ${record.displayName} (${record.id}) at ${wallClock()}. ` +
-                "It runs in the background; Pi wakes you automatically when it completes, fails, or asks a blocking " +
-                "question, so you may end your turn now or keep working on unrelated scope. " +
-                "Don't hold the turn open with a Bash `sleep`, `set_timer`, or status poll." +
+                `Started ${record.displayName} (${record.id}) at ${wallClock()} in the background.` +
                 (model_profile === resolvedProfile.profile
                   ? ""
                   : ` Model profile ${model_profile} is not configured; using inherit.`),

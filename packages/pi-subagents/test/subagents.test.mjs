@@ -237,10 +237,10 @@ for (const { name, tool, args, expected } of [
     expected: ["Subagent · renderer-review · high", "Review rendering."],
   },
   {
-    name: "launch headers show the inherited profile when omitted",
+    name: "launch headers show the default profile when omitted",
     tool: "subagent",
     args: { display_name: "review", prompt: "Inspect tests." },
-    expected: ["Subagent · review · inherit", "Inspect tests."],
+    expected: ["Subagent · review · high", "Inspect tests."],
   },
   {
     name: "message headers show the recipient and guidance",
@@ -254,7 +254,7 @@ for (const { name, tool, args, expected } of [
     args: { id: "a12bc345-6789-4123-8123-123456789abc" },
     expected: ["Kill Subagent · a12bc345"],
   },
-  { name: "launch headers tolerate missing streamed arguments", tool: "subagent", args: {}, expected: ["Subagent · inherit"] },
+  { name: "launch headers tolerate missing streamed arguments", tool: "subagent", args: {}, expected: ["Subagent · high"] },
   { name: "message headers tolerate missing streamed arguments", tool: "message_subagent", args: {}, expected: ["Message Subagent"] },
   { name: "kill headers tolerate missing streamed arguments", tool: "kill_subagent", args: {}, expected: ["Kill Subagent"] },
   {
@@ -309,7 +309,7 @@ function renderLaunch(extension, result, args = {}, options = {}, context = {}) 
 
 test("launch results stay compact after child cleanup and expand to the unchanged full text", async (t) => {
   const extension = await loadExtension(t, async () => fakeChild());
-  const args = { display_name: "renderer-review", prompt: "Review rendering." };
+  const args = { display_name: "renderer-review", model_profile: "inherit", prompt: "Review rendering." };
   const launch = await extension.execute(args);
   const persisted = JSON.parse(JSON.stringify(launch));
   await waitFor(() => extension.sent.length === 1);
@@ -382,7 +382,7 @@ test("launch returns distinct UUID handles without waiting for child startup", a
   // Launch no longer forces termination; the parent decides whether to keep working.
   assert.equal(first.terminate, undefined);
   assert.equal(second.terminate, undefined);
-  assert.match(first.content[0].text, /wakes you automatically when it completes, fails, or asks a blocking question/i);
+  assert.match(first.content[0].text, /^Started research .* in the background\./i);
   assert.match(first.content[0].text, ISO_TIMESTAMP);
   assert.equal(first.details.display_name, "research");
   assert.equal(second.details.display_name, "research");
@@ -659,7 +659,10 @@ test("blocking question steers a busy parent without waiting for settlement", as
   assert.equal(questionNotice.message.details.id, launch.details.id);
   assert.equal(questionNotice.message.details.display_name, "asker");
   assert.equal(questionNotice.message.details.body, "Which API should I preserve?");
-  assert.equal(questionNotice.message.content, `Subagent asker (${launch.details.id}) asks:\n\nWhich API should I preserve?`);
+  assert.equal(
+    questionNotice.message.content,
+    `Subagent asker (${launch.details.id}) asks:\n\nWhich API should I preserve?\n\nReply with message_subagent (id: ${launch.details.id}) to unblock it.`,
+  );
   assert.match(questionNotice.message.content, /Which API should I preserve\?/);
   await assert.rejects(
     extension.execute({ display_name: "blocked", prompt: "Do not start." }),
@@ -733,7 +736,7 @@ test("kill confirms while terminal cleanup remains unfinished", async (t) => {
   try {
     assert.equal(confirmed, true);
     const killed = await killing;
-    assert.match(killed.content[0].text, /^Cooperatively killed immediate \([0-9a-f-]{36}\)\.$/);
+    assert.match(killed.content[0].text, /^Killed immediate \([0-9a-f-]{36}\)\.$/);
     assert.equal(disposed, false);
     await assert.rejects(extension.kill({ id: launch.details.id }), /no active subagent/i);
     await assert.rejects(
@@ -820,7 +823,7 @@ test("kill aborts a waiting child and returns a bare acknowledgement", async (t)
   assertCallsInAnyOrder(lifecycle, ["abort", "shutdown", "dispose"]);
   assert.equal(killed.details.id, launch.details.id);
   assert.equal(killed.details.display_name, "cancelled");
-  assert.match(killed.content[0].text, /^Cooperatively killed cancelled \([0-9a-f-]{36}\)\.$/);
+  assert.match(killed.content[0].text, /^Killed cancelled \([0-9a-f-]{36}\)\.$/);
   assert.deepEqual(extension.statuses.at(-1), { key: "subagents", text: undefined });
   assert.equal(extension.sent.length, 1);
   assert.equal(extension.sent[0].message.customType, "subagent-question");
@@ -862,7 +865,7 @@ test("kill wins a simultaneous natural failure without duplicate cleanup or noti
 
   assertCallsInAnyOrder(lifecycle, ["abort", "shutdown", "dispose"]);
   assert.equal(extension.sent.length, 0);
-  assert.match(killed.content[0].text, /^Cooperatively killed racer \([0-9a-f-]{36}\)\.$/);
+  assert.match(killed.content[0].text, /^Killed racer \([0-9a-f-]{36}\)\.$/);
 });
 
 // A killed starting child stays owned until its eventual cleanup finishes.
@@ -884,7 +887,7 @@ test("parent shutdown joins cleanup for a killed starting child", async (t) => {
   const launch = await extension.execute({ display_name: "starting", prompt: "Start slowly." });
 
   const killed = await extension.kill({ id: launch.details.id });
-  assert.match(killed.content[0].text, /^Cooperatively killed starting \([0-9a-f-]{36}\)\.$/);
+  assert.match(killed.content[0].text, /^Killed starting \([0-9a-f-]{36}\)\.$/);
   assert.deepEqual(lifecycle, []);
   assert.equal(extension.sent.length, 0);
 
@@ -935,22 +938,22 @@ test("launch creates one fresh child with inherited capabilities and a delimited
   assert.equal(creation.messageParentTool.name, "message_parent");
   assert.equal("messages" in creation, false);
   assert.match(creation.systemPrompt, /^parent system prompt/);
-  assert.match(creation.systemPrompt, /fresh subagent, not the parent agent/i);
-  assert.match(creation.systemPrompt, /no parent conversation history/i);
+  assert.match(creation.systemPrompt, /you are a subagent/i);
   assert.match(creation.systemPrompt, /parent remains authoritative/i);
+  assert.match(creation.systemPrompt, /do only what the task asks.*don't expand scope/i);
   assert.match(creation.systemPrompt, /share.*working directory.*concurrent work/i);
   assert.match(creation.systemPrompt, /inspect current file contents before editing/i);
-  assert.match(creation.systemPrompt, /modify files only when.*explicitly asks/i);
+  assert.match(creation.systemPrompt, /change or create files only when the task calls for it/i);
   assert.match(creation.systemPrompt, /never revert unrelated changes/i);
   assert.match(creation.systemPrompt, /conflicts.*stop and report/i);
   assert.match(creation.systemPrompt, /final assistant message is delivered to the parent verbatim/i);
-  assert.match(creation.systemPrompt, /artifacts only when the delegated task asks/i);
+  assert.match(creation.systemPrompt, /self-contained deliverable that directly fulfills the task/i);
+  assert.match(creation.systemPrompt, /if you can't complete the task, report what you tried/i);
   assert.match(creation.systemPrompt, /message_parent.*meaningful milestones.*question/i);
   assert.equal(child.messages.length, 0);
   assert.equal(prompts.length, 1);
   assert.match(prompts[0], new RegExp(`subagent_id: ${result.details.id}`));
   assert.match(prompts[0], /display_name: worker/);
-  assert.match(prompts[0], /context: fresh; no parent conversation inherited/);
   assert.match(prompts[0], /task:\nImplement the narrow change\./);
 });
 

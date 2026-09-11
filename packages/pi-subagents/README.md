@@ -1,6 +1,6 @@
 # pi-subagents
 
-Fresh, in-process background subagents for [Pi](https://pi.dev). A child receives one delegated task without inheriting the parent conversation, while the parent remains free to continue working.
+Background subagents for [Pi](https://pi.dev). A child receives one delegated task without inheriting the parent conversation, while the parent remains free to continue working.
 
 ## Install
 
@@ -16,7 +16,7 @@ The repository manifest loads this extension automatically alongside the other p
 
 | Tool | Parameters | Behavior |
 | --- | --- | --- |
-| `subagent` | `display_name`, `prompt`, optional `model_profile` | Starts a child in the background and immediately returns a full UUID. Pi wakes the parent automatically when the child completes, fails, or asks a blocking question, so the parent may end its turn right after launch or keep working on unrelated scope. Do not wait with a Bash `sleep`, `set_timer`, or status poll. |
+| `subagent` | `display_name`, `prompt`, optional `model_profile` (defaults to `high`) | Starts a child in the background and immediately returns a full UUID. Pi wakes the parent automatically when the child completes, fails, or asks a blocking question, so the parent may end its turn right after launch or keep working on unrelated scope. Do not wait with a Bash `sleep`, `set_timer`, or status poll. |
 | `message_subagent` | full `id`, `message` | Steers the addressed child after its current tool-call batch, or answers its pending question directly. |
 | `kill_subagent` | full `id` | Signals cooperative cancellation and immediately acknowledges the child as killed (no result); shutdown and disposal continue in the background. |
 
@@ -41,12 +41,12 @@ Configuration is global at `$PI_CODING_AGENT_DIR/subagents.json`, which defaults
       "thinkingLevel": "high"
     }
   },
-  "blockedModels": [{ "provider": "anthropic", "model": "claude-opus-4-6" }]
+  "blockedModels": [{ "provider": "anthropic", "model": "claude-opus-4-1" }]
 }
 ```
 
 - `maxConcurrent` limits starting, running, and waiting children. It defaults to `4`; an invalid value warns and falls back to `4`. Excess launches are rejected rather than queued.
-- `inherit` is the default profile and uses the parent's current model and thinking level.
+- `model_profile` defaults to `high`. The `inherit` profile uses the parent's current model and thinking level.
 - Named profiles are `low`, `medium`, `high`, and `xhigh`. A configured mapping requires an available provider/model and a thinking level supported by that model.
 - Requesting a named profile with no mapping—including when the file or `profiles` object is absent—falls back to `inherit` and says so in the successful launch response. Malformed configuration and configured profiles that are invalid or unavailable still reject launch.
 - `blockedModels` denies specific models from subagents, matched case-insensitively by `provider`/`model` against the resolved model. It applies to every launch path—`inherit`, a named profile, and the inherit fallback of an unconfigured profile—so a blocked parent model cannot leak into a child. A blocked launch is rejected with an actionable error rather than downgraded; relaunch with an allowed `model_profile`. The parent's own model is never restricted. It defaults to empty, and a malformed `blockedModels` rejects launch fail-closed.
@@ -67,7 +67,7 @@ Explicit kill claims the killed outcome and releases any pending child question 
 
 ## Tool-call headers
 
-In TUI mode, launch headers show the display name, requested model profile (defaulting to `inherit`), and up to three rendered lines of the delegated task. Expand the tool row to see the full prompt. Message headers show the recipient's short UUID and guidance text; kill headers show the recipient's short UUID. Expanded message and kill headers show the full UUID. These headers use only call arguments, so they remain available after child cleanup and do not change the tool inputs.
+In TUI mode, launch headers show the display name, requested model profile (defaulting to `high`), and up to three rendered lines of the delegated task. Expand the tool row to see the full prompt. Message headers show the recipient's short UUID and guidance text; kill headers show the recipient's short UUID. Expanded message and kill headers show the full UUID. These headers use only call arguments, so they remain available after child cleanup and do not change the tool inputs.
 
 ## Lifecycle messages
 
@@ -106,7 +106,7 @@ When no supported multiplexer is available—or when opening one fails—the com
 - Pi SDK `0.84.2` has no confirmed non-cancellable tree pre-commit hook. If a later extension vetoes navigation after this extension handles `session_before_tree`, the children remain stopped and controls remain closed until the extension/session reloads.
 - Cleanup never reverts workspace changes already made by a child.
 
-## Fresh-context boundary
+## Context boundary
 
 Each child is runtime-only and starts with no parent conversation messages. It receives the parent's effective system prompt, working directory, selected model configuration, active work-tool names, and freshly rediscovered configured extensions and skills. Temporary `pi -e` extensions, SDK-inline factories, parent-only resource paths, and runtime-injected custom tools cannot be cloned through Pi SDK `0.84.2`.
 
