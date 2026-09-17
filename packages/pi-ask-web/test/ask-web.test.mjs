@@ -13,8 +13,8 @@ const USAGE = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-const LUNA = { provider: "openai-codex", id: "gpt-5.6-luna" };
-const DEFAULT_MODELS = [{ provider: "openai-codex", id: "gpt-5.4" }, LUNA];
+const ASTRA = { provider: "openai-codex", id: "gpt-6-astra" };
+const DEFAULT_MODELS = [{ provider: "openai-codex", id: "gpt-5.6-luna" }, ASTRA];
 
 function loadTool() {
   let tool;
@@ -33,7 +33,7 @@ function assistantMessage(overrides = {}) {
     content: [{ type: "text", text: "## Answer\nGrounded answer with [source](https://example.com).\n\n## Sources\n- [Example](https://example.com)\n\n## Uncertainty\nNone noted." }],
     api: "openai-codex-responses",
     provider: "openai-codex",
-    model: LUNA.id,
+    model: ASTRA.id,
     usage: USAGE,
     stopReason: "stop",
     timestamp: Date.now(),
@@ -152,6 +152,7 @@ test("depth maps to search context size and defaults to medium", async () => {
     const params = depth === undefined ? { question: "q" } : { question: "q", depth };
     await run(tool, params, makeCtx(registry));
     assert.equal(webSearchTool(registry.calls[0].payload).search_context_size, expected);
+    assert.equal(registry.calls[0].options.reasoning, "low");
   }
 });
 
@@ -202,19 +203,19 @@ test("more than twenty distinct domains is rejected, exactly twenty is allowed",
 });
 
 // The nested completion uses the pinned Codex model regardless of the active conversational provider.
-test("a non-OpenAI active model still runs the nested completion on the pinned Luna model", async () => {
+test("a non-OpenAI active model still runs the nested completion on the pinned Astra model", async () => {
   const tool = loadTool();
   const registry = makeRegistry();
   await run(tool, { question: "latest example" }, makeCtx(registry, { model: { provider: "anthropic", id: "claude-test" } }));
-  assert.equal(registry.calls[0].model.id, "gpt-5.6-luna");
+  assert.equal(registry.calls[0].model.id, "gpt-6-astra");
   assert.equal(registry.calls[0].model.provider, "openai-codex");
 });
 
-// The pinned Luna model is required; a catalog without it fails without choosing another tier.
-test("a logged-in catalog without the pinned Luna model reports the missing model, not a fallback", async () => {
+// The pinned Astra model is required; a catalog without it fails without choosing another tier.
+test("a logged-in catalog without the pinned Astra model reports the missing model, not a fallback", async () => {
   const tool = loadTool();
   const registry = makeRegistry({ models: [{ provider: "openai-codex", id: "gpt-5.4" }], configured: true });
-  await assert.rejects(run(tool, { question: "q" }, makeCtx(registry)), /gpt-5\.6-luna/);
+  await assert.rejects(run(tool, { question: "q" }, makeCtx(registry)), /gpt-6-astra/);
   assert.equal(registry.calls.length, 0);
 });
 
@@ -236,11 +237,11 @@ test("no parent messages, system prompt, tools, or session content enter the nes
 test("the payload preserves Pi fields while adding a required web_search tool", async () => {
   const tool = loadTool();
   const registry = makeRegistry({
-    basePayload: { model: "gpt-5.6-luna", input: [{ role: "user" }], store: false, tools: [{ type: "function", name: "existing" }] },
+    basePayload: { model: "gpt-6-astra", input: [{ role: "user" }], store: false, tools: [{ type: "function", name: "existing" }] },
   });
   await run(tool, { question: "q", depth: "thorough", domains: ["example.com"] }, makeCtx(registry));
   const { payload } = registry.calls[0];
-  assert.equal(payload.model, "gpt-5.6-luna");
+  assert.equal(payload.model, "gpt-6-astra");
   assert.deepEqual(payload.input, [{ role: "user" }]);
   assert.equal(payload.store, false);
   assert.equal(payload.tool_choice, "required");

@@ -5,8 +5,7 @@ import { Type } from "typebox";
 
 const TOOL_NAME = "ask_web";
 const PROVIDER = "openai-codex";
-// ponytail: pinned Luna model. Generalize to newest-Luna ranking when a second Luna tier ships.
-const LUNA_MODEL_ID = "gpt-5.6-luna";
+const MODEL_ID = "gpt-6-astra";
 const REQUEST_TIMEOUT_MS = 120_000;
 const MAX_DOMAINS = 20;
 
@@ -128,10 +127,10 @@ export default function askWeb(pi: ExtensionAPI): void {
 
       const model = ctx.modelRegistry
         .getAll()
-        .find((candidate) => candidate.provider === PROVIDER && candidate.id === LUNA_MODEL_ID);
+        .find((candidate) => candidate.provider === PROVIDER && candidate.id === MODEL_ID);
       if (!model) {
         throw new Error(
-          `ask_web requires the OpenAI Codex ${LUNA_MODEL_ID} model, which is not available in your catalog.`,
+          `ask_web requires the OpenAI Codex ${MODEL_ID} model, which is not available in your catalog.`,
         );
       }
 
@@ -146,6 +145,7 @@ export default function askWeb(pi: ExtensionAPI): void {
           {
             signal,
             transport: "sse",
+            reasoning: "low",
             timeoutMs: REQUEST_TIMEOUT_MS,
             maxRetries: 0,
             onPayload(payload) {
