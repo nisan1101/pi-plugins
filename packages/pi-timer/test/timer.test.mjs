@@ -461,7 +461,11 @@ test("set timer teaches the agent when and how to use it", () => {
   assert.match(guidance, /reuse the same reason when polling the same target/i);
   assert.match(guidance, /background, previous results, and next-step plans in the conversation/i);
   assert.match(guidance, /inspect current status.*reschedule only while pending.*inspect the result and continue/i);
-  assert.match(guidance, /at least two minutes between checks.*longer for slow work/i);
+  assert.match(guidance, /initial delay based on expected completion time/i);
+  assert.match(guidance, /pending without meaningful progress.*increase the delay on each retry/i);
+  assert.match(guidance, /rather than repeating the initial interval/i);
+  assert.match(guidance, /progress signals or an estimated completion time.*different delay when warranted/i);
+  assert.doesNotMatch(guidance, /at least two minutes|60–120 seconds/i);
   assert.match(tool.parameters.properties.reason.description, /one-line check instruction.*target identifier and status check.*reuse unchanged/i);
   assert.match(guidance, /alone in its tool-call batch.*other tool calls finish.*end the current run/i);
 });

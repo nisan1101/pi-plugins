@@ -101,7 +101,7 @@ export default function timer(pi: ExtensionAPI) {
       "For local work that warrants set_timer, launch a named job with zmx when available (`zmx run <session> -d <command...>`), otherwise another process manager.",
       "Keep the set_timer reason to one short line: identify the target and how to check it. Include the job/session ID or remote identifier. Aim for under 30 words, allowing longer commands or paths. Reuse the same reason when polling the same target.",
       "Keep background, previous results, and next-step plans in the conversation, not in the set_timer reason.",
-      "On set_timer wake, inspect current status. Reschedule only while pending; otherwise inspect the result and continue the task. Wait at least two minutes between checks, longer for slow work.",
+      "On set_timer wake, inspect current status. Reschedule only while pending; otherwise inspect the result and continue the task. Choose the initial delay based on expected completion time. If still pending without meaningful progress, increase the delay on each retry (for example, 60, 120, then 240 seconds) rather than repeating the initial interval. Use progress signals or an estimated completion time to choose a different delay when warranted.",
       "Call set_timer alone in its tool-call batch, after other tool calls finish, so it can end the current run.",
     ],
     parameters: Type.Object({
