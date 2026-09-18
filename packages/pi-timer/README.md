@@ -37,8 +37,9 @@ Then call `set_timer` with a short check instruction:
 Keep the reason to one line naming the target and status check. Aim for under
 30 words, allowing longer commands or paths. Reuse the same reason for repeated
 checks; leave background, previous results, and next-step plans in the conversation.
-On wake, inspect current status. Reschedule only while pending; otherwise inspect
-the result and continue the task. Choose the initial delay based on expected
+On wake, check current status. Reschedule while pending; when finished, inspect
+the result and continue the task. An unavailable status is not evidence of
+completion. Choose the initial delay based on expected
 completion time. If still pending without meaningful progress, increase the delay
 on each retry (for example, 60, 120, then 240 seconds) rather than repeating the
 initial interval. Use progress signals or an estimated completion time to choose

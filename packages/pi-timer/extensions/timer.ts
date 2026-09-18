@@ -78,7 +78,7 @@ export default function timer(pi: ExtensionAPI) {
         customType: TIMER_CANCELLED_TYPE,
         content:
           `${cause} ` +
-          "These timers will not be restored. Their targets were not inspected or changed; local jobs may still be running.\n\n" +
+          "These timers will not resume. Target status is unknown; the work may still be running.\n\n" +
           summary,
         display: true,
         details: {
@@ -93,23 +93,24 @@ export default function timer(pi: ExtensionAPI) {
     name: "set_timer",
     label: "Set Timer",
     description:
-      "Set a relative timer to revisit long-running external work, such as a managed local job, CI, or Kubernetes pod readiness. Ends the current run and wakes a later turn to check progress.",
+      "Schedule a later check of asynchronous work. When called alone, ends the current run and wakes a later turn.",
     promptSnippet:
-      "Yield during long-running external work and wake later to check progress",
+      "Wake later to check asynchronous work.",
     promptGuidelines: [
-      "Run local commands in the foreground by default. Choose managed background execution and set_timer when you reasonably expect the work to take more than roughly 1–2 minutes. Apply the same duration guideline when deciding whether to use set_timer while waiting on remote state.",
-      "For local work that warrants set_timer, launch a named job with zmx when available (`zmx run <session> -d <command...>`), otherwise another process manager.",
-      "Keep the set_timer reason to one short line: identify the target and how to check it. Include the job/session ID or remote identifier. Aim for under 30 words, allowing longer commands or paths. Reuse the same reason when polling the same target.",
-      "Keep background, previous results, and next-step plans in the conversation, not in the set_timer reason.",
-      "On set_timer wake, inspect current status. Reschedule only while pending; otherwise inspect the result and continue the task. Choose the initial delay based on expected completion time. If still pending without meaningful progress, increase the delay on each retry (for example, 60, 120, then 240 seconds) rather than repeating the initial interval. Use progress signals or an estimated completion time to choose a different delay when warranted.",
-      "Call set_timer alone in its tool-call batch, after other tool calls finish, so it can end the current run.",
+      "Use set_timer to revisit asynchronous work, including CI and deployments. Run local commands in the foreground by default; for long-running background commands, use a named zmx job when available, otherwise another process manager.",
+      "Choose set_timer delays from expected completion time. On wake, check current status. If still pending without meaningful progress, increase successive delays—for example, 60 → 120 → 240 seconds. Use progress signals or completion estimates to adjust timing. When finished, inspect the result and continue.",
+      "Call set_timer alone, after other tool calls finish.",
     ],
     parameters: Type.Object({
-      seconds: Type.Number({ exclusiveMinimum: 0, maximum: MAX_DELAY_SECONDS }),
+      seconds: Type.Number({
+        exclusiveMinimum: 0,
+        maximum: MAX_DELAY_SECONDS,
+        description: "Delay before the next check, in seconds. Delivery may be later.",
+      }),
       reason: Type.String({
         minLength: 1,
         description:
-          "One-line check instruction: target identifier and status check. Reuse unchanged when polling the same target.",
+          "One short line identifying the target and status check. Aim for under 30 words, allowing longer identifiers or commands. Reuse for the same check; omit background, progress history, and next-step plans.",
       }),
     }),
     renderCall(args, theme) {
