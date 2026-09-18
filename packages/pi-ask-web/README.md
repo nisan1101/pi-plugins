@@ -20,15 +20,20 @@ ask_web({
 })
 ```
 
+- **question** must include relevant context, scope, and date or version requirements.
+  The researcher cannot see the parent conversation.
 - **depth** maps to OpenAI search context size: `quick → low`, `standard → medium`,
-  `thorough → high`. Depth changes retrieval context, not the output-size ceiling.
+  `thorough → high`. Depth changes retrieval context, not answer length or reasoning
+  effort; it does not guarantee a particular response time.
 - **domains** is a hard allowlist enforced by the hosted search tool. Hostnames only
   (e.g. `docs.python.org`); subdomains are included. Malformed entries are rejected,
   duplicates and casing are normalized, and at most 20 distinct domains are allowed.
 
 ### Response
 
-Markdown with three stable sections:
+The researcher is asked for the shortest answer that resolves the question,
+usually a few sentences for simple lookups, with an approximate 500-word ceiling
+and at most eight sources. It is asked to use these Markdown sections:
 
 ```md
 ## Answer
@@ -41,9 +46,11 @@ Markdown with three stable sections:
 None noted.
 ```
 
-When no sources can be established, `Sources` contains `- No sources found.` and
-`Uncertainty` explains why. Source links are produced by the nested model and are
-not authoritative raw citation metadata.
+When no sources can be established, the requested response uses `- No sources found.`
+and explains the gap under `Uncertainty`. These length and formatting rules are
+prompt instructions, not runtime guarantees; non-empty responses are returned even
+if they differ. Source links are produced by the nested model and are not
+authoritative raw citation metadata.
 
 ## Requirements
 
