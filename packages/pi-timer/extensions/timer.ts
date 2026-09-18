@@ -99,13 +99,18 @@ export default function timer(pi: ExtensionAPI) {
     promptGuidelines: [
       "Run local commands in the foreground by default. Choose managed background execution and set_timer when you reasonably expect the work to take more than roughly 1–2 minutes. Apply the same duration guideline when deciding whether to use set_timer while waiting on remote state.",
       "For local work that warrants set_timer, launch a named job with zmx when available (`zmx run <session> -d <command...>`), otherwise another process manager.",
-      "Give set_timer a self-contained reason naming the target (including the session or job name for local work), how to check its status, and what to do if pending or complete.",
-      "When polling with set_timer, check the target’s current status and reschedule only while pending. Prefer intervals of 60–120 seconds or longer, based on expected completion time.",
+      "Keep the set_timer reason to one short line: identify the target and how to check it. Include the job/session ID or remote identifier. Aim for under 30 words, allowing longer commands or paths. Reuse the same reason when polling the same target.",
+      "Keep background, previous results, and next-step plans in the conversation, not in the set_timer reason.",
+      "On set_timer wake, inspect current status. Reschedule only while pending; otherwise inspect the result and continue the task. Wait at least two minutes between checks, longer for slow work.",
       "Call set_timer alone in its tool-call batch, after other tool calls finish, so it can end the current run.",
     ],
     parameters: Type.Object({
       seconds: Type.Number({ exclusiveMinimum: 0, maximum: MAX_DELAY_SECONDS }),
-      reason: Type.String({ minLength: 1 }),
+      reason: Type.String({
+        minLength: 1,
+        description:
+          "One-line check instruction: target identifier and status check. Reuse unchanged when polling the same target.",
+      }),
     }),
     renderCall(args, theme) {
       let text = theme.fg("toolTitle", theme.bold("Set Timer"));

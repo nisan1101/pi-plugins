@@ -456,8 +456,12 @@ test("set timer teaches the agent when and how to use it", () => {
   assert.match(guidance, /expect the work to take more than roughly 1–2 minutes/i);
   assert.match(guidance, /same duration guideline.*remote state/i);
   assert.match(guidance, /zmx when available.*another process manager/i);
-  assert.match(guidance, /self-contained reason naming the target.*session or job name.*check its status.*pending or complete/i);
-  assert.match(guidance, /check the target’s current status and reschedule only while pending/i);
-  assert.match(guidance, /prefer intervals of 60–120 seconds or longer/i);
+  assert.match(guidance, /reason to one short line.*target.*check it.*job\/session ID or remote identifier/i);
+  assert.match(guidance, /under 30 words.*longer commands or paths/i);
+  assert.match(guidance, /reuse the same reason when polling the same target/i);
+  assert.match(guidance, /background, previous results, and next-step plans in the conversation/i);
+  assert.match(guidance, /inspect current status.*reschedule only while pending.*inspect the result and continue/i);
+  assert.match(guidance, /at least two minutes between checks.*longer for slow work/i);
+  assert.match(tool.parameters.properties.reason.description, /one-line check instruction.*target identifier and status check.*reuse unchanged/i);
   assert.match(guidance, /alone in its tool-call batch.*other tool calls finish.*end the current run/i);
 });

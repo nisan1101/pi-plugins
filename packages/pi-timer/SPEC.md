@@ -16,7 +16,7 @@ Committed `/tree` navigation changes the active branch without replacing the run
 
 Provide a project-local Pi extension with one model-callable capability: set a timer for a relative delay.
 
-For local long-running commands, the agent launches a named job through zmx when available or another process manager, then includes its session or job name in the timer reason. For remote waits, the reason identifies the remote target, status check, and actions for pending and completed states. Scheduling returns immediately; when it is the only tool in its batch, its terminating result ends the current agent run.
+For local long-running commands, the agent launches a named job through zmx when available or another process manager, then includes its session or job name in the timer reason. For remote waits, the reason identifies the remote target and status check. Reasons are short check instructions, reused unchanged for repeated polls; shared polling guidance defines actions for pending and completed states. Scheduling returns immediately; when it is the only tool in its batch, its terminating result ends the current agent run.
 
 When the timer expires, the extension injects a visible custom timer message into the same Pi session. If the agent is idle, Pi starts a new agent run without user input. If an agent run is already active, Pi queues the timer message as a follow-up and delivers it after the active work settles.
 
@@ -47,9 +47,9 @@ Tree navigation is a cancellation boundary. Before Pi changes the leaf, the exte
 17. As a user, I want unresolved timers reported when I next prompt a resumed session, so that Pi shutdown does not silently lose planned checks.
 18. As a user, I want a delayed timer to fire after Pi becomes responsive again if the event loop or computer was temporarily suspended, so that elapsed timers are not silently discarded during a live session.
 19. As an agent, I want to set a timer with a relative delay, so that I can choose an appropriate polling interval for each job.
-20. As an agent, I want to attach a self-contained reason to a timer, so that I know which local job or remote target to inspect after intervening turns or context compaction.
+20. As an agent, I want a one-line reason identifying the target and status check, so that I can inspect it after intervening turns or context compaction without repeating a handover on every poll.
 21. As an agent, I want scheduling to end my current run, so that I do not immediately poll the job I just launched.
-22. As an agent, I want the timer reason to tell me what to do if the target is pending or completed, so that resumption is deterministic.
+22. As an agent, I want shared polling guidance to tell me what to do if the target is pending or completed, so that each reason only needs to identify the check.
 23. As an agent, I want multiple independent timers to remain possible, so that separate background activities do not overwrite one another.
 24. As an agent, I want invalid delays or empty reasons rejected at the tool interface, so that unusable timers are not silently accepted.
 25. As an agent, I want timer expiration to deliver a custom contextual message rather than a user-role message, so that provenance remains accurate.
@@ -68,15 +68,15 @@ Tree navigation is a cancellation boundary. Before Pi changes the leaf, the exte
 
 - Build a Timer extension as a single deep module. Its interface exposes scheduling; its implementation hides timer creation, timer-message construction, delivery, expiration, and session cleanup.
 - Register one model-callable tool named `set_timer`.
-- The tool reads as `set_timer(seconds, reason)`: `seconds` is a positive relative delay and `reason` is non-empty and self-contained.
+- The tool reads as `set_timer(seconds, reason)`: `seconds` is a positive relative delay and `reason` is a non-empty check instruction.
 - The delay represents a minimum wait. Runtime scheduling, event-loop load, process suspension, or computer sleep may cause the timer to fire later.
 - Validate the delay against the runtime timer’s supported range. Reject non-finite, non-positive, or unsupported values rather than silently coercing them.
-- Prompt guidance requires the reason to name the target, describe the status check, and state what to do for pending and completed states; managed local work must include its process-manager session or job name. Runtime validation keeps the reason opaque and rejects only blank text.
+- Prompt guidance keeps the reason to one short line identifying the target and status check, including the local job/session ID or remote identifier. Aim for under 30 words, allowing longer commands or paths, and reuse the same reason when polling the same target. Background, previous results, and next-step plans stay in the conversation. The reason schema describes this check-instruction contract. Runtime validation keeps the reason opaque and rejects only blank text; the word target is guidance, not a hard limit.
 - Agent guidance makes foreground execution the default for local commands and reserves background execution and timer-based waiting for work expected to take more than roughly 1–2 minutes. Eligible local jobs use named zmx sessions when available, otherwise another process manager. Unmanaged raw `&` and `nohup` are not the supported local workflow.
 - Polling cadence is separate from task eligibility: guidance prefers 60–120 seconds or longer between checks. These are agent-facing preferences, not runtime restrictions.
 - Add an agent instruction allowing `set_timer` for remote asynchronous conditions such as Kubernetes pod readiness, without requiring a local process.
 - Add an agent instruction requiring `set_timer` to be called alone after all other work in the current run is complete.
-- Add an agent instruction clarifying that a timer means “check the target,” not “the work has completed,” and to reschedule only while the target remains pending.
+- Add an agent instruction clarifying that a timer means “check the target,” not “the work has completed.” On wake, inspect current status and reschedule only while pending; otherwise inspect the result and continue the task. Wait at least two minutes between checks, longer for slow work.
 - Scheduling creates an in-memory runtime timer and returns immediately.
 - The scheduling tool returns a terminating result so Pi skips the automatic post-tool model call when all finalized results in that tool batch are terminating.
 - The tool’s instruction should discourage combining `set_timer` with unrelated parallel tool calls because a non-terminating result in the same tool batch prevents early termination.

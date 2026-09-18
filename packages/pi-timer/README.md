@@ -28,19 +28,27 @@ For a test suite you expect to take several minutes, use a managed background jo
 zmx run build-check -d npm test
 ```
 
-Then call `set_timer` with a self-contained reason that includes that session name:
+Then call `set_timer` with a short check instruction:
 
-```text
-Set a timer for 120 seconds. Check zmx session build-check with zmx list. If it is
-still active, schedule another check based on expected remaining time; if it ended,
-inspect exit_code and report.
+```json
+{"seconds": 120, "reason": "Check zmx session build-check with zmx list."}
 ```
+
+Keep the reason to one line naming the target and status check. Aim for under
+30 words, allowing longer commands or paths. Reuse the same reason for repeated
+checks; leave background, previous results, and next-step plans in the conversation.
+On wake, inspect current status. Reschedule only while pending; otherwise inspect
+the result and continue the task. Wait at least two minutes between checks,
+longer for slow work.
 
 When the timer fires, use `zmx list` for a non-blocking status check. Active tasks have no `ended` field; completed tasks include `ended` and `exit_code`. Do not use `zmx wait` when the task may still be active because it blocks.
 
 If zmx is unavailable, use another process manager and put its session or job name plus the corresponding status check in the timer reason. Avoid unmanaged raw `&` or `nohup`.
 
-A timer can instead revisit remote work without a local process, such as checking whether a Kubernetes pod became Ready. Its reason should name the remote target, the status command, and what to do for pending and completed states.
+A timer can instead revisit remote work without a local process. Example reasons:
+
+- `Check CI run 123456 in acme/api with gh run view.`
+- `Check deployment api in Kubernetes context staging, namespace backend.`
 
 ## Install
 
