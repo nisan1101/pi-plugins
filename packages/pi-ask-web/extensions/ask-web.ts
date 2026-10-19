@@ -5,7 +5,7 @@ import { Type } from "typebox";
 
 const TOOL_NAME = "ask_web";
 const PROVIDER = "openai-codex";
-const MODEL_ID = "gpt-6-astra";
+const MODEL_ID = "gpt-6.1-sol";
 const REQUEST_TIMEOUT_MS = 120_000;
 const MAX_DOMAINS = 20;
 
@@ -147,7 +147,7 @@ export default function askWeb(pi: ExtensionAPI): void {
           {
             signal,
             transport: "sse",
-            reasoning: "low",
+            reasoning: "medium",
             timeoutMs: REQUEST_TIMEOUT_MS,
             maxRetries: 0,
             onPayload(payload) {

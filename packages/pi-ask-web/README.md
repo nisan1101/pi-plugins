@@ -56,8 +56,8 @@ authoritative raw citation metadata.
 
 `ask_web` uses your Pi OpenAI Codex login. If you are not logged in, the tool
 returns an instruction to run Pi's OpenAI Codex login. It requires the
-`gpt-6-astra` model with low reasoning effort and fails clearly (without falling
-back to another tier) when it is unavailable. Reasoning effort stays low for all
+`gpt-6.1-sol` model with medium reasoning effort and fails clearly (without falling
+back to another tier) when it is unavailable. Reasoning effort stays medium for all
 search depths.
 
 ## Development
